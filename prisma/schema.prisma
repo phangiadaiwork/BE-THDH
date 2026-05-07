@@ -1,0 +1,58 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  TEACHER
+  STUDENT
+}
+
+model User {
+  id        Int       @id @default(autoincrement())
+  username  String    @unique
+  password  String
+  fullName  String
+  className String?
+  school    String?
+  role      Role      @default(STUDENT)
+  attempts  Attempt[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Exam {
+  id        Int        @id @default(autoincrement())
+  title     String
+  nodes     MindNode[]
+  attempts  Attempt[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+model MindNode {
+  id            Int    @id @default(autoincrement())
+  examId        Int
+  exam          Exam   @relation(fields: [examId], references: [id], onDelete: Cascade)
+  parentId      Int?
+  label         String
+  question      String
+  correctAnswer String
+  hint          String @default("")
+  points        Int    @default(1)
+  order         Int    @default(0)
+}
+
+model Attempt {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  examId    Int
+  exam      Exam     @relation(fields: [examId], references: [id])
+  score     Int
+  createdAt DateTime @default(now())
+}
