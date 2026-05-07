@@ -22,6 +22,7 @@ router.post('/login', async (req, res) => {
           include: {
             school: true,
             grade: true,
+            academicYear: true,
           },
         },
       },

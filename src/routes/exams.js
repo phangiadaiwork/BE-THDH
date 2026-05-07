@@ -6,6 +6,7 @@ const { authenticate, requireRole } = require('../middleware/auth');
 const {
   ensureGrade,
   normalizeText,
+  parseOptionalInt,
   serializeLessonExam,
 } = require('../utils/education');
 
@@ -13,86 +14,169 @@ const router = express.Router();
 const prisma = new PrismaClient();
 const upload = multer({ storage: multer.memoryStorage() });
 
-function parseOptionalInt(value) {
-  const parsed = parseInt(value, 10);
-  return Number.isNaN(parsed) ? null : parsed;
+function slugifyChapterCode(value) {
+  return normalizeText(value)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
-async function ensureChapterAndLesson(body) {
-  const gradeCode = normalizeText(body.gradeLevel, '12');
-  const grade = await ensureGrade(prisma, gradeCode);
+function normalizeExamPayload(body = {}) {
+  return {
+    gradeLevel: normalizeText(body.gradeLevel, '12'),
+    chapterTitle: normalizeText(body.chapterTitle),
+    chapterCode: slugifyChapterCode(body.chapterCode || body.chapterTitle),
+    chapterDisplayOrder: parseOptionalInt(body.chapterDisplayOrder) ?? 0,
+    lessonNumber: parseOptionalInt(body.lessonNumber),
+    lessonTitle: normalizeText(body.lessonTitle || body.title),
+    exerciseTitle: normalizeText(body.exerciseTitle, 'Bài tập'),
+    theoryContent: String(body.theoryContent ?? '').trim(),
+    displayOrder: parseOptionalInt(body.displayOrder),
+    title: normalizeText(body.title || body.lessonTitle),
+    isPublic: body.isPublic === undefined ? true : Boolean(body.isPublic),
+  };
+}
 
-  const chapterCode = normalizeText(
-    body.chapterCode || body.chapterKey || body.chapterTitle?.toLowerCase().replace(/\s+/g, '-'),
-    'chuong-1'
-  );
-  const chapterTitle = normalizeText(body.chapterTitle, 'Chương I');
-  const chapterDisplayOrder = parseOptionalInt(body.chapterDisplayOrder) ?? 0;
+function validateExamMetadata(payload) {
+  if (!['10', '11', '12'].includes(payload.gradeLevel)) return 'Khối lớp chỉ nhận 10, 11 hoặc 12';
+  if (!payload.chapterTitle) return 'Tên chương là bắt buộc';
+  if (!payload.chapterCode) return 'Mã chương là bắt buộc';
+  if (!payload.lessonTitle) return 'Tên bài học là bắt buộc';
+  if (payload.lessonNumber !== null && payload.lessonNumber <= 0) return 'Số bài phải lớn hơn 0';
+  return null;
+}
 
-  const chapter = await prisma.chapter.upsert({
-    where: { gradeId_code: { gradeId: grade.id, code: chapterCode } },
-    update: {
-      title: chapterTitle,
-      displayOrder: chapterDisplayOrder,
-    },
-    create: {
-      gradeId: grade.id,
-      code: chapterCode,
-      title: chapterTitle,
-      displayOrder: chapterDisplayOrder,
-    },
-  });
+function normalizeOptionValues(node) {
+  if (Array.isArray(node.options)) return node.options;
 
-  const lessonTitle = normalizeText(body.lessonTitle || body.title, 'Bài học');
-  const lessonNumber = parseOptionalInt(body.lessonNumber);
-  const displayOrder = parseOptionalInt(body.displayOrder) ?? lessonNumber ?? 0;
+  const rawOptions = ['optionA', 'optionB', 'optionC', 'optionD']
+    .map((key) => normalizeText(node[key]))
+    .filter(Boolean);
 
-  const existingLesson = await prisma.lesson.findFirst({
-    where: {
-      chapterId: chapter.id,
-      OR: [
-        { title: lessonTitle },
-        ...(lessonNumber === null ? [] : [{ number: lessonNumber }]),
-      ],
-    },
-    include: { exam: true },
-  });
+  return rawOptions.map((option, index) => `${['A', 'B', 'C', 'D'][index]}. ${option}`);
+}
 
-  if (existingLesson?.exam) {
-    const error = new Error('Bài học này đã có bài tập');
+function normalizeNodeInput(node, index = 0) {
+  return {
+    tempId: normalizeText(node.tempId || node.nodeId, `node-${index + 1}`),
+    parentTempId: normalizeText(node.parentTempId || node.parentNodeId) || null,
+    label: normalizeText(node.label),
+    question: normalizeText(node.question),
+    options: normalizeOptionValues(node),
+    correctAnswer: normalizeText(node.correctAnswer).toUpperCase(),
+    hint: normalizeText(node.hint),
+    points: Math.max(1, parseInt(node.points, 10) || 1),
+    order: parseOptionalInt(node.order) ?? index,
+  };
+}
+
+function validateNodes(nodes) {
+  if (!Array.isArray(nodes) || nodes.length === 0) {
+    return 'Cần ít nhất một node';
+  }
+
+  const tempIds = new Set();
+  const roots = [];
+
+  for (const node of nodes) {
+    if (!node.tempId) return 'Mỗi node phải có mã định danh';
+    if (tempIds.has(node.tempId)) return `Trùng nodeId/tempId: ${node.tempId}`;
+    tempIds.add(node.tempId);
+
+    if (!node.parentTempId) roots.push(node.tempId);
+    if (!node.label) return `Node ${node.tempId} thiếu nhãn`;
+    if (!node.question) return `Node ${node.tempId} thiếu câu hỏi`;
+    if (!node.correctAnswer) return `Node ${node.tempId} thiếu đáp án đúng`;
+    if (node.parentTempId && node.parentTempId === node.tempId) {
+      return `Node ${node.tempId} không thể là cha của chính nó`;
+    }
+
+    const hasOptions = Array.isArray(node.options) && node.options.length > 0;
+    if (hasOptions) {
+      if (node.options.length < 2 || node.options.length > 4) {
+        return `Node ${node.tempId} phải có từ 2 đến 4 phương án`;
+      }
+      if (!['A', 'B', 'C', 'D'].includes(node.correctAnswer)) {
+        return `Node ${node.tempId} phải có đáp án đúng là A, B, C hoặc D`;
+      }
+      const optionLetters = node.options.map((option) => option.charAt(0));
+      if (!optionLetters.includes(node.correctAnswer)) {
+        return `Node ${node.tempId} có đáp án đúng không khớp với danh sách phương án`;
+      }
+    }
+  }
+
+  if (roots.length !== 1) return 'Cây bài tập phải có đúng 1 node gốc';
+
+  for (const node of nodes) {
+    if (node.parentTempId && !tempIds.has(node.parentTempId)) {
+      return `Node ${node.tempId} tham chiếu parent không tồn tại: ${node.parentTempId}`;
+    }
+  }
+
+  return null;
+}
+
+async function ensureChapterAndLesson(payload) {
+  const metaError = validateExamMetadata(payload);
+  if (metaError) {
+    const error = new Error(metaError);
     error.statusCode = 400;
     throw error;
   }
 
-  if (existingLesson) {
-    return prisma.lesson.update({
-      where: { id: existingLesson.id },
-      data: {
-        number: lessonNumber,
-        title: lessonTitle,
-        theoryContent: String(body.theoryContent ?? '').trim(),
-        displayOrder,
-      },
-    });
-  }
+  const grade = await ensureGrade(prisma, payload.gradeLevel);
 
-  return prisma.lesson.create({
-    data: {
-      chapterId: chapter.id,
-      number: lessonNumber,
-      title: lessonTitle,
-      theoryContent: String(body.theoryContent ?? '').trim(),
-      displayOrder,
+  const chapter = await prisma.chapter.upsert({
+    where: { gradeId_code: { gradeId: grade.id, code: payload.chapterCode } },
+    update: {
+      title: payload.chapterTitle,
+      displayOrder: payload.chapterDisplayOrder,
+    },
+    create: {
+      gradeId: grade.id,
+      code: payload.chapterCode,
+      title: payload.chapterTitle,
+      displayOrder: payload.chapterDisplayOrder,
     },
   });
-}
 
-async function findVisibleClassIds(examId) {
-  const assignments = await prisma.examAssignment.findMany({
-    where: { examId },
-    select: { classId: true },
+  const lessonDisplayOrder = payload.displayOrder ?? payload.lessonNumber ?? 0;
+
+  const lesson = await prisma.lesson.upsert({
+    where: {
+      chapterId_title: {
+        chapterId: chapter.id,
+        title: payload.lessonTitle,
+      },
+    },
+    update: {
+      number: payload.lessonNumber,
+      theoryContent: payload.theoryContent,
+      displayOrder: lessonDisplayOrder,
+    },
+    create: {
+      chapterId: chapter.id,
+      number: payload.lessonNumber,
+      title: payload.lessonTitle,
+      theoryContent: payload.theoryContent,
+      displayOrder: lessonDisplayOrder,
+    },
   });
-  return new Set(assignments.map((item) => item.classId));
+
+  const existingExam = await prisma.exam.findUnique({
+    where: { lessonId: lesson.id },
+  });
+
+  if (existingExam) {
+    const error = new Error('Bài học này đã có bộ bài tập');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return { lesson };
 }
 
 async function buildExamWhereForUser(userId, role) {
@@ -103,9 +187,7 @@ async function buildExamWhereForUser(userId, role) {
     select: { classId: true },
   });
 
-  if (!student?.classId) {
-    return { isPublic: true };
-  }
+  if (!student?.classId) return { isPublic: true };
 
   return {
     OR: [
@@ -134,13 +216,12 @@ async function fetchExamList(where = {}) {
             include: {
               school: true,
               grade: true,
+              academicYear: true,
             },
           },
         },
       },
-      _count: {
-        select: { nodes: true },
-      },
+      _count: { select: { nodes: true } },
     },
   });
 
@@ -157,129 +238,113 @@ async function fetchExamList(where = {}) {
 
 function summarizeAttempts(attempts) {
   const grouped = {};
-
   attempts.forEach((attempt) => {
-    if (!grouped[attempt.examId]) {
-      grouped[attempt.examId] = {
-        completed: [],
-        inProgress: [],
-      };
-    }
-
+    if (!grouped[attempt.examId]) grouped[attempt.examId] = { completed: [], inProgress: [] };
     if (attempt.isComplete) grouped[attempt.examId].completed.push(attempt);
     else grouped[attempt.examId].inProgress.push(attempt);
   });
 
   const result = {};
   Object.entries(grouped).forEach(([examId, item]) => {
-    const completed = item.completed;
-    const total = completed.reduce((sum, attempt) => sum + attempt.score, 0);
-    const bestScore = completed.length > 0 ? Math.max(...completed.map((attempt) => attempt.score)) : null;
-    const lastAttempt = completed.length > 0 ? completed[completed.length - 1] : null;
-
+    const total = item.completed.reduce((sum, attempt) => sum + attempt.score, 0);
+    const bestScore = item.completed.length > 0 ? Math.max(...item.completed.map((attempt) => attempt.score)) : null;
+    const lastAttempt = item.completed.length > 0 ? item.completed[item.completed.length - 1] : null;
     result[parseInt(examId, 10)] = {
-      status: item.inProgress.length > 0 ? 'IN_PROGRESS' : completed.length > 0 ? 'COMPLETED' : 'NOT_STARTED',
-      attemptCount: completed.length,
-      avgScore: completed.length > 0 ? parseFloat((total / completed.length).toFixed(2)) : null,
+      status: item.inProgress.length > 0 ? 'IN_PROGRESS' : item.completed.length > 0 ? 'COMPLETED' : 'NOT_STARTED',
+      attemptCount: item.completed.length,
+      avgScore: item.completed.length > 0 ? parseFloat((total / item.completed.length).toFixed(2)) : null,
       bestScore,
       lastScore: lastAttempt?.score ?? null,
       lastCompletedAt: lastAttempt?.createdAt ?? null,
-      canReview: item.inProgress.length === 0 && completed.length > 0,
+      canReview: item.inProgress.length === 0 && item.completed.length > 0,
     };
   });
-
   return result;
 }
 
+async function createExamWithNodes(payload, normalizedNodes) {
+  const { lesson } = await ensureChapterAndLesson(payload);
+
+  const exam = await prisma.exam.create({
+    data: {
+      lessonId: lesson.id,
+      title: normalizeText(payload.title || lesson.title, lesson.title),
+      exerciseTitle: payload.exerciseTitle,
+      isPublic: payload.isPublic,
+    },
+  });
+
+  const nodesById = Object.fromEntries(normalizedNodes.map((node) => [node.tempId, node]));
+  const roots = normalizedNodes.filter((node) => !node.parentTempId);
+  const idMap = {};
+  const queue = roots.map((root) => root.tempId);
+  const processed = new Set();
+
+  while (queue.length > 0) {
+    const tempId = queue.shift();
+    if (processed.has(tempId)) continue;
+
+    const node = nodesById[tempId];
+    const parentId = node.parentTempId ? idMap[node.parentTempId] : null;
+
+    const created = await prisma.mindNode.create({
+      data: {
+        examId: exam.id,
+        parentId,
+        label: node.label,
+        question: node.question,
+        options: node.options.length > 0 ? node.options : null,
+        correctAnswer: node.correctAnswer,
+        hint: node.hint,
+        points: node.points,
+        order: node.order,
+      },
+    });
+
+    idMap[tempId] = created.id;
+    processed.add(tempId);
+
+    normalizedNodes
+      .filter((child) => child.parentTempId === tempId && !processed.has(child.tempId))
+      .sort((a, b) => a.order - b.order)
+      .forEach((child) => queue.push(child.tempId));
+  }
+
+  return prisma.exam.findUnique({
+    where: { id: exam.id },
+    include: {
+      lesson: { include: { chapter: { include: { grade: true } } } },
+      assignments: {
+        include: {
+          studentClass: { include: { school: true, grade: true, academicYear: true } },
+        },
+      },
+      nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] },
+      _count: { select: { nodes: true } },
+    },
+  });
+}
+
+router.get('/meta', authenticate, requireRole('TEACHER'), async (_req, res) => {
+  try {
+    const schools = await prisma.school.findMany({ orderBy: { name: 'asc' } });
+    res.json({
+      schools,
+      grades: ['10', '11', '12'],
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.post('/', authenticate, requireRole('TEACHER'), async (req, res) => {
   try {
-    const { nodes } = req.body;
+    const payload = normalizeExamPayload(req.body);
+    const normalizedNodes = (req.body.nodes || []).map(normalizeNodeInput);
+    const nodeError = validateNodes(normalizedNodes);
+    if (nodeError) return res.status(400).json({ error: nodeError });
 
-    if (!Array.isArray(nodes) || nodes.length === 0) {
-      return res.status(400).json({ error: 'Cần ít nhất một node' });
-    }
-
-    const lesson = await ensureChapterAndLesson(req.body);
-    const exam = await prisma.exam.create({
-      data: {
-        lessonId: lesson.id,
-        title: normalizeText(req.body.title || lesson.title, lesson.title),
-        exerciseTitle: normalizeText(req.body.exerciseTitle, 'Bài tập'),
-        isPublic: req.body.isPublic === undefined ? true : Boolean(req.body.isPublic),
-      },
-    });
-
-    const nodesById = {};
-    nodes.forEach((node) => {
-      nodesById[node.tempId] = node;
-    });
-
-    const roots = nodes.filter((node) => !node.parentTempId);
-    if (roots.length === 0) {
-      await prisma.exam.delete({ where: { id: exam.id } });
-      return res.status(400).json({ error: 'Không tìm thấy node gốc' });
-    }
-
-    const idMap = {};
-    const queue = roots.map((root) => root.tempId);
-    const processed = new Set();
-
-    while (queue.length > 0) {
-      const tempId = queue.shift();
-      if (processed.has(tempId)) continue;
-
-      const node = nodesById[tempId];
-      if (!node) continue;
-
-      const parentId = node.parentTempId ? idMap[node.parentTempId] : null;
-
-      const created = await prisma.mindNode.create({
-        data: {
-          examId: exam.id,
-          parentId,
-          label: normalizeText(node.label),
-          question: normalizeText(node.question),
-          options: node.options || null,
-          correctAnswer: normalizeText(node.correctAnswer),
-          hint: normalizeText(node.hint),
-          points: Math.max(1, parseInt(node.points, 10) || 1),
-          order: parseInt(node.order, 10) || 0,
-        },
-      });
-
-      idMap[tempId] = created.id;
-      processed.add(tempId);
-
-      const children = nodes.filter(
-        (item) => item.parentTempId === tempId && !processed.has(item.tempId)
-      );
-      queue.push(...children.map((child) => child.tempId));
-    }
-
-    const fullExam = await prisma.exam.findUnique({
-      where: { id: exam.id },
-      include: {
-        lesson: {
-          include: {
-            chapter: {
-              include: {
-                grade: true,
-              },
-            },
-          },
-        },
-        assignments: {
-          include: {
-            studentClass: {
-              include: { school: true, grade: true },
-            },
-          },
-        },
-        nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] },
-        _count: { select: { nodes: true } },
-      },
-    });
-
+    const fullExam = await createExamWithNodes(payload, normalizedNodes);
     res.status(201).json({
       ...serializeLessonExam(fullExam),
       nodes: fullExam.nodes,
@@ -293,11 +358,12 @@ router.post('/', authenticate, requireRole('TEACHER'), async (req, res) => {
 router.get('/template', authenticate, requireRole('TEACHER'), (_req, res) => {
   const wb = xlsx.utils.book_new();
   const ws = xlsx.utils.aoa_to_sheet([
-    ['nodeId', 'parentNodeId', 'label', 'question', 'optionA', 'optionB', 'optionC', 'optionD', 'correctAnswer', 'hint', 'points'],
-    ['1', '', 'Chủ đề chính', 'Câu hỏi gốc?', 'Đáp án A', 'Đáp án B', 'Đáp án C', 'Đáp án D', 'A', 'Gợi ý...', '1'],
-    ['2', '1', 'Nhánh 1', 'Câu hỏi nhánh 1?', 'Đáp án A', 'Đáp án B', 'Đáp án C', 'Đáp án D', 'B', '', '2'],
+    ['nodeId', 'parentNodeId', 'label', 'question', 'optionA', 'optionB', 'optionC', 'optionD', 'correctAnswer', 'hint', 'points', 'order'],
+    ['1', '', 'Chủ đề chính', 'Câu hỏi gốc?', 'Đáp án A', 'Đáp án B', 'Đáp án C', 'Đáp án D', 'A', 'Gợi ý...', '1', '0'],
+    ['2', '1', 'Nhánh 1', 'Câu hỏi nhánh 1?', 'Đáp án A', 'Đáp án B', 'Đáp án C', 'Đáp án D', 'B', '', '2', '0'],
+    ['3', '1', 'Nhánh 2', 'Câu hỏi nhánh 2?', '', '', '', '', 'Đáp án tự luận', 'Gợi ý ngắn', '1', '1'],
   ]);
-  ws['!cols'] = [{ wch: 8 }, { wch: 12 }, { wch: 16 }, { wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 20 }, { wch: 7 }];
+  ws['!cols'] = [{ wch: 10 }, { wch: 14 }, { wch: 20 }, { wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 20 }, { wch: 8 }, { wch: 8 }];
   xlsx.utils.book_append_sheet(wb, ws, 'BaiTap');
   const buf = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
   res.setHeader('Content-Disposition', 'attachment; filename="mau_bai_tap.xlsx"');
@@ -309,77 +375,18 @@ router.post('/import', authenticate, requireRole('TEACHER'), upload.single('file
   try {
     if (!req.file) return res.status(400).json({ error: 'Cần upload file Excel' });
 
+    const payload = normalizeExamPayload(req.body);
     const wb = xlsx.read(req.file.buffer, { type: 'buffer' });
     const ws = wb.Sheets[wb.SheetNames[0]];
     const rows = xlsx.utils.sheet_to_json(ws, { defval: '' });
 
     if (rows.length === 0) return res.status(400).json({ error: 'File không có dữ liệu' });
 
-    req.body.title = req.body.title || req.body.lessonTitle;
-    const lesson = await ensureChapterAndLesson(req.body);
-    const exam = await prisma.exam.create({
-      data: {
-        lessonId: lesson.id,
-        title: normalizeText(req.body.title || lesson.title, lesson.title),
-        exerciseTitle: normalizeText(req.body.exerciseTitle, 'Bài tập'),
-        isPublic: req.body.isPublic === undefined ? true : Boolean(req.body.isPublic),
-      },
-    });
+    const normalizedNodes = rows.map((row, index) => normalizeNodeInput(row, index));
+    const nodeError = validateNodes(normalizedNodes);
+    if (nodeError) return res.status(400).json({ error: nodeError });
 
-    const idMap = {};
-    const ordersPerParent = {};
-
-    for (const row of rows) {
-      const tempId = normalizeText(row.nodeId);
-      if (!tempId) continue;
-
-      const parentTempId = normalizeText(row.parentNodeId);
-      const parentId = parentTempId ? (idMap[parentTempId] ?? null) : null;
-      const orderKey = parentTempId || 'root';
-      if (!ordersPerParent[orderKey]) ordersPerParent[orderKey] = 0;
-      const order = ordersPerParent[orderKey]++;
-
-      const options = ['optionA', 'optionB', 'optionC', 'optionD']
-        .map((key) => normalizeText(row[key]))
-        .filter(Boolean)
-        .map((option, index) => `${['A', 'B', 'C', 'D'][index]}. ${option}`);
-
-      const created = await prisma.mindNode.create({
-        data: {
-          examId: exam.id,
-          parentId,
-          label: normalizeText(row.label, `Node ${tempId}`),
-          question: normalizeText(row.question),
-          options: options.length > 0 ? options : null,
-          correctAnswer: normalizeText(row.correctAnswer),
-          hint: normalizeText(row.hint),
-          points: Math.max(1, parseInt(row.points, 10) || 1),
-          order,
-        },
-      });
-      idMap[tempId] = created.id;
-    }
-
-    const fullExam = await prisma.exam.findUnique({
-      where: { id: exam.id },
-      include: {
-        lesson: {
-          include: {
-            chapter: {
-              include: { grade: true },
-            },
-          },
-        },
-        assignments: {
-          include: {
-            studentClass: { include: { school: true, grade: true } },
-          },
-        },
-        nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] },
-        _count: { select: { nodes: true } },
-      },
-    });
-
+    const fullExam = await createExamWithNodes(payload, normalizedNodes);
     res.status(201).json({
       ...serializeLessonExam(fullExam),
       nodes: fullExam.nodes,
@@ -398,10 +405,7 @@ router.get('/catalog', authenticate, async (req, res) => {
 
     if (req.user.role === 'STUDENT' && lessons.length > 0) {
       const attempts = await prisma.attempt.findMany({
-        where: {
-          userId: req.user.id,
-          examId: { in: lessons.map((lesson) => lesson.id) },
-        },
+        where: { userId: req.user.id, examId: { in: lessons.map((lesson) => lesson.id) } },
         orderBy: { createdAt: 'asc' },
       });
       attemptSummaryByExam = summarizeAttempts(attempts);
@@ -447,16 +451,10 @@ router.get('/:id', authenticate, async (req, res) => {
     const exam = await prisma.exam.findFirst({
       where: { id, ...where },
       include: {
-        lesson: {
-          include: {
-            chapter: {
-              include: { grade: true },
-            },
-          },
-        },
+        lesson: { include: { chapter: { include: { grade: true } } } },
         assignments: {
           include: {
-            studentClass: { include: { school: true, grade: true } },
+            studentClass: { include: { school: true, grade: true, academicYear: true } },
           },
         },
         nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] },
@@ -498,9 +496,7 @@ router.put('/:id/visibility', authenticate, requireRole('TEACHER'), async (req, 
         isPublic: Boolean(isPublic),
         assignments: {
           deleteMany: {},
-          create: classRecords.map((studentClass) => ({
-            classId: studentClass.id,
-          })),
+          create: classRecords.map((studentClass) => ({ classId: studentClass.id })),
         },
       },
     });
@@ -511,7 +507,7 @@ router.put('/:id/visibility', authenticate, requireRole('TEACHER'), async (req, 
         lesson: { include: { chapter: { include: { grade: true } } } },
         assignments: {
           include: {
-            studentClass: { include: { school: true, grade: true } },
+            studentClass: { include: { school: true, grade: true, academicYear: true } },
           },
         },
         _count: { select: { nodes: true } },

@@ -28,21 +28,14 @@ async function findAccessibleExam(examId, userId, role) {
   return prisma.exam.findFirst({
     where,
     include: {
-      lesson: {
-        include: {
-          chapter: {
-            include: {
-              grade: true,
-            },
-          },
-        },
-      },
+      lesson: { include: { chapter: { include: { grade: true } } } },
       assignments: {
         include: {
           studentClass: {
             include: {
               school: true,
               grade: true,
+              academicYear: true,
             },
           },
         },
@@ -194,18 +187,10 @@ router.get('/review', authenticate, async (req, res) => {
     if (Number.isNaN(examId)) return res.status(400).json({ error: 'examId là bắt buộc' });
 
     const attempt = await prisma.attempt.findFirst({
-      where: {
-        userId: req.user.id,
-        examId,
-        isComplete: true,
-      },
+      where: { userId: req.user.id, examId, isComplete: true },
       include: {
         nodeAnswers: {
-          select: {
-            nodeId: true,
-            answer: true,
-            isCorrect: true,
-          },
+          select: { nodeId: true, answer: true, isCorrect: true },
         },
       },
       orderBy: { createdAt: 'desc' },
@@ -271,19 +256,11 @@ router.get('/my', authenticate, async (req, res) => {
       include: {
         exam: {
           include: {
-            lesson: {
-              include: {
-                chapter: {
-                  include: {
-                    grade: true,
-                  },
-                },
-              },
-            },
+            lesson: { include: { chapter: { include: { grade: true } } } },
             assignments: {
               include: {
                 studentClass: {
-                  include: { school: true, grade: true },
+                  include: { school: true, grade: true, academicYear: true },
                 },
               },
             },
@@ -339,6 +316,7 @@ router.get('/stats', authenticate, requireRole('TEACHER'), async (_req, res) => 
           include: {
             school: true,
             grade: true,
+            academicYear: true,
           },
         },
       },
@@ -347,19 +325,11 @@ router.get('/stats', authenticate, requireRole('TEACHER'), async (_req, res) => 
 
     const exams = await prisma.exam.findMany({
       include: {
-        lesson: {
-          include: {
-            chapter: {
-              include: {
-                grade: true,
-              },
-            },
-          },
-        },
+        lesson: { include: { chapter: { include: { grade: true } } } },
         assignments: {
           include: {
             studentClass: {
-              include: { school: true, grade: true },
+              include: { school: true, grade: true, academicYear: true },
             },
           },
         },
@@ -369,21 +339,15 @@ router.get('/stats', authenticate, requireRole('TEACHER'), async (_req, res) => 
 
     const serializedLessons = exams.map((exam) => serializeLessonExam(exam));
     const attempts = await prisma.attempt.findMany({
-      where: {
-        userId: { in: students.map((student) => student.id) },
-      },
+      where: { userId: { in: students.map((student) => student.id) } },
       orderBy: { createdAt: 'asc' },
     });
 
     const rows = students.map((student) => {
       const studentAttempts = attempts.filter((attempt) => attempt.userId === student.id);
       const lessonStats = serializedLessons.map((lesson) => {
-        const completed = studentAttempts.filter(
-          (attempt) => attempt.examId === lesson.id && attempt.isComplete
-        );
-        const inProgress = studentAttempts.filter(
-          (attempt) => attempt.examId === lesson.id && !attempt.isComplete
-        );
+        const completed = studentAttempts.filter((attempt) => attempt.examId === lesson.id && attempt.isComplete);
+        const inProgress = studentAttempts.filter((attempt) => attempt.examId === lesson.id && !attempt.isComplete);
         const summary = buildAttemptSummary(completed);
 
         return {
@@ -397,9 +361,11 @@ router.get('/stats', authenticate, requireRole('TEACHER'), async (_req, res) => 
         studentId: student.id,
         fullName: student.fullName,
         username: student.username,
+        classId: student.studentClass?.id ?? null,
         className: student.studentClass?.name ?? '',
         school: student.studentClass?.school?.name ?? '',
         gradeLevel: student.studentClass?.grade?.code ?? '',
+        academicYearName: student.studentClass?.academicYear?.name ?? '',
         lessonStats,
       };
     });
@@ -408,28 +374,32 @@ router.get('/stats', authenticate, requireRole('TEACHER'), async (_req, res) => 
       include: {
         grade: true,
         school: true,
+        academicYear: true,
         _count: { select: { students: true } },
       },
     });
 
     res.json({
       rows: rows.sort((a, b) =>
+        (b.academicYearName || '').localeCompare(a.academicYearName || '', 'vi') ||
         (a.gradeLevel || '').localeCompare(b.gradeLevel || '', 'vi') ||
         (a.className || '').localeCompare(b.className || '', 'vi') ||
         a.fullName.localeCompare(b.fullName, 'vi')
       ),
       classes: classes
         .sort((a, b) =>
+          (b.academicYear?.name || '').localeCompare(a.academicYear?.name || '', 'vi') ||
           (a.grade?.code || '').localeCompare(b.grade?.code || '', 'vi') ||
           a.name.localeCompare(b.name, 'vi')
         )
         .map((studentClass) => ({
-        id: studentClass.id,
-        name: studentClass.name,
-        school: studentClass.school?.name ?? '',
-        gradeLevel: studentClass.grade.code,
-        studentCount: studentClass._count.students,
-      })),
+          id: studentClass.id,
+          name: studentClass.name,
+          school: studentClass.school?.name ?? '',
+          gradeLevel: studentClass.grade.code,
+          academicYearName: studentClass.academicYear.name,
+          studentCount: studentClass._count.students,
+        })),
       lessons: serializedLessons,
     });
   } catch (error) {
@@ -447,15 +417,7 @@ router.get('/node-stats', authenticate, requireRole('TEACHER'), async (req, res)
     const exam = await prisma.exam.findUnique({
       where: { id: examId },
       include: {
-        lesson: {
-          include: {
-            chapter: {
-              include: {
-                grade: true,
-              },
-            },
-          },
-        },
+        lesson: { include: { chapter: { include: { grade: true } } } },
         nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] },
       },
     });
@@ -466,7 +428,7 @@ router.get('/node-stats', authenticate, requireRole('TEACHER'), async (req, res)
         role: 'STUDENT',
         ...(className ? { studentClass: { name: className } } : {}),
       },
-      select: { id: true, studentClass: { select: { name: true } } },
+      select: { id: true },
     });
     const studentIds = students.map((student) => student.id);
 
