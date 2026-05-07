@@ -8,8 +8,6 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-
-
 enum Role {
   TEACHER
   STUDENT
@@ -29,33 +27,53 @@ model User {
 }
 
 model Exam {
-  id        Int        @id @default(autoincrement())
-  title     String
-  nodes     MindNode[]
-  attempts  Attempt[]
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  id             Int        @id @default(autoincrement())
+  title          String
+  visibleClasses String[]   @default([])
+  isPublic       Boolean    @default(true)
+  nodes          MindNode[]
+  attempts       Attempt[]
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
 }
 
 model MindNode {
-  id            Int    @id @default(autoincrement())
+  id            Int          @id @default(autoincrement())
   examId        Int
-  exam          Exam   @relation(fields: [examId], references: [id], onDelete: Cascade)
+  exam          Exam         @relation(fields: [examId], references: [id], onDelete: Cascade)
   parentId      Int?
   label         String
   question      String
+  options       Json?
   correctAnswer String
-  hint          String @default("")
-  points        Int    @default(1)
-  order         Int    @default(0)
+  hint          String       @default("")
+  points        Int          @default(1)
+  order         Int          @default(0)
+  nodeAnswers   NodeAnswer[]
 }
 
 model Attempt {
-  id        Int      @id @default(autoincrement())
-  userId    Int
-  user      User     @relation(fields: [userId], references: [id])
-  examId    Int
-  exam      Exam     @relation(fields: [examId], references: [id])
-  score     Int
-  createdAt DateTime @default(now())
+  id          Int          @id @default(autoincrement())
+  userId      Int
+  user        User         @relation(fields: [userId], references: [id])
+  examId      Int
+  exam        Exam         @relation(fields: [examId], references: [id])
+  score       Int          @default(0)
+  isComplete  Boolean      @default(false)
+  nodeAnswers NodeAnswer[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model NodeAnswer {
+  id         Int      @id @default(autoincrement())
+  attempt    Attempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  attemptId  Int
+  node       MindNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  nodeId     Int
+  answer     String
+  isCorrect  Boolean
+  answeredAt DateTime @default(now())
+
+  @@unique([attemptId, nodeId])
 }
