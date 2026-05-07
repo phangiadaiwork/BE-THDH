@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const { ensureDefaultAdmin } = require('./utils/ensureDefaultAdmin');
 
 const authRoutes = require('./routes/auth');
 const studentRoutes = require('./routes/students');
@@ -30,4 +31,15 @@ app.use((err, _req, res, _next) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+async function startServer() {
+  try {
+    await ensureDefaultAdmin();
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  } catch (error) {
+    console.error('Failed to initialize server:', error);
+    process.exit(1);
+  }
+}
+
+startServer();
