@@ -62,7 +62,7 @@ model Attempt {
   isComplete  Boolean      @default(false)
   nodeAnswers NodeAnswer[]
   createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  updatedAt   DateTime     @default(now()) @updatedAt
 }
 
 model NodeAnswer {
