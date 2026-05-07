@@ -5,7 +5,6 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
 }
 
 enum Role {
@@ -13,13 +12,75 @@ enum Role {
   STUDENT
 }
 
+model School {
+  id        Int            @id @default(autoincrement())
+  name      String         @unique
+  classes   StudentClass[]
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+model Grade {
+  id        Int            @id @default(autoincrement())
+  code      String         @unique
+  title     String
+  classes   StudentClass[]
+  chapters  Chapter[]
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+model StudentClass {
+  id           Int             @id @default(autoincrement())
+  name         String          @unique
+  gradeId      Int
+  grade        Grade           @relation(fields: [gradeId], references: [id])
+  schoolId     Int?
+  school       School?         @relation(fields: [schoolId], references: [id])
+  students     User[]
+  assignments  ExamAssignment[]
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+}
+
+model Chapter {
+  id           Int       @id @default(autoincrement())
+  gradeId       Int
+  grade         Grade     @relation(fields: [gradeId], references: [id], onDelete: Cascade)
+  code          String
+  title         String
+  displayOrder  Int       @default(0)
+  lessons       Lesson[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([gradeId, code])
+  @@index([gradeId, displayOrder])
+}
+
+model Lesson {
+  id            Int       @id @default(autoincrement())
+  chapterId      Int
+  chapter        Chapter   @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  number         Int?
+  title          String
+  theoryContent  String    @default("")
+  displayOrder   Int       @default(0)
+  exam           Exam?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([chapterId, title])
+  @@index([chapterId, displayOrder])
+}
+
 model User {
   id        Int       @id @default(autoincrement())
   username  String    @unique
   password  String
   fullName  String
-  className String?
-  school    String?
+  classId    Int?
+  studentClass StudentClass? @relation(fields: [classId], references: [id])
   role      Role      @default(STUDENT)
   attempts  Attempt[]
   createdAt DateTime  @default(now())
@@ -27,14 +88,28 @@ model User {
 }
 
 model Exam {
-  id             Int        @id @default(autoincrement())
-  title          String
-  visibleClasses String[]   @default([])
-  isPublic       Boolean    @default(true)
-  nodes          MindNode[]
-  attempts       Attempt[]
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  id            Int             @id @default(autoincrement())
+  lessonId       Int             @unique
+  lesson         Lesson          @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  title         String
+  exerciseTitle String          @default("Bài tập")
+  isPublic      Boolean         @default(true)
+  assignments   ExamAssignment[]
+  nodes         MindNode[]
+  attempts      Attempt[]
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+}
+
+model ExamAssignment {
+  id        Int          @id @default(autoincrement())
+  examId     Int
+  exam       Exam         @relation(fields: [examId], references: [id], onDelete: Cascade)
+  classId     Int
+  studentClass StudentClass @relation(fields: [classId], references: [id], onDelete: Cascade)
+  createdAt  DateTime     @default(now())
+
+  @@unique([examId, classId])
 }
 
 model MindNode {

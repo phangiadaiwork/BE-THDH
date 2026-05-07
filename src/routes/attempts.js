@@ -1,23 +1,93 @@
 const express = require('express');
 const { PrismaClient } = require('@prisma/client');
 const { authenticate, requireRole } = require('../middleware/auth');
+const { serializeLessonExam } = require('../utils/education');
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// POST /api/attempts/start — bắt đầu lượt làm mới (trả về attemptId)
+async function getStudentClassId(userId) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { classId: true },
+  });
+  return user?.classId ?? null;
+}
+
+async function findAccessibleExam(examId, userId, role) {
+  const where = { id: examId };
+
+  if (role === 'STUDENT') {
+    const classId = await getStudentClassId(userId);
+    where.OR = [
+      { isPublic: true },
+      ...(classId ? [{ assignments: { some: { classId } } }] : []),
+    ];
+  }
+
+  return prisma.exam.findFirst({
+    where,
+    include: {
+      lesson: {
+        include: {
+          chapter: {
+            include: {
+              grade: true,
+            },
+          },
+        },
+      },
+      assignments: {
+        include: {
+          studentClass: {
+            include: {
+              school: true,
+              grade: true,
+            },
+          },
+        },
+      },
+      _count: { select: { nodes: true } },
+    },
+  });
+}
+
+function buildAttemptSummary(attempts) {
+  if (attempts.length === 0) {
+    return {
+      attemptCount: 0,
+      avgScore: null,
+      bestScore: null,
+      lastScore: null,
+      lastCompletedAt: null,
+    };
+  }
+
+  const total = attempts.reduce((sum, attempt) => sum + attempt.score, 0);
+  const bestScore = Math.max(...attempts.map((attempt) => attempt.score));
+  const lastAttempt = attempts[attempts.length - 1];
+
+  return {
+    attemptCount: attempts.length,
+    avgScore: parseFloat((total / attempts.length).toFixed(2)),
+    bestScore,
+    lastScore: lastAttempt.score,
+    lastCompletedAt: lastAttempt.createdAt,
+  };
+}
+
 router.post('/start', authenticate, async (req, res) => {
   try {
-    const { examId } = req.body;
+    const parsedExamId = parseInt(req.body.examId, 10);
     const userId = req.user.id;
-    const parsedExamId = parseInt(examId);
 
-    if (isNaN(parsedExamId)) return res.status(400).json({ error: 'examId không hợp lệ' });
+    if (Number.isNaN(parsedExamId)) {
+      return res.status(400).json({ error: 'examId không hợp lệ' });
+    }
 
-    const exam = await prisma.exam.findUnique({ where: { id: parsedExamId } });
+    const exam = await findAccessibleExam(parsedExamId, userId, req.user.role);
     if (!exam) return res.status(404).json({ error: 'Không tìm thấy bài tập' });
 
-    // Xóa attempt chưa hoàn thành cũ nếu có
     await prisma.attempt.deleteMany({
       where: { userId, examId: parsedExamId, isComplete: false },
     });
@@ -33,23 +103,22 @@ router.post('/start', authenticate, async (req, res) => {
   }
 });
 
-// POST /api/attempts/answer — lưu câu trả lời từng node
 router.post('/answer', authenticate, async (req, res) => {
   try {
     const { attemptId, nodeId, answer, isCorrect } = req.body;
     const userId = req.user.id;
 
     const attempt = await prisma.attempt.findFirst({
-      where: { id: parseInt(attemptId), userId, isComplete: false },
+      where: { id: parseInt(attemptId, 10), userId, isComplete: false },
     });
     if (!attempt) return res.status(404).json({ error: 'Không tìm thấy lượt làm' });
 
     await prisma.nodeAnswer.upsert({
-      where: { attemptId_nodeId: { attemptId: attempt.id, nodeId: parseInt(nodeId) } },
+      where: { attemptId_nodeId: { attemptId: attempt.id, nodeId: parseInt(nodeId, 10) } },
       update: { answer: String(answer), isCorrect: Boolean(isCorrect) },
       create: {
         attemptId: attempt.id,
-        nodeId: parseInt(nodeId),
+        nodeId: parseInt(nodeId, 10),
         answer: String(answer),
         isCorrect: Boolean(isCorrect),
       },
@@ -62,21 +131,20 @@ router.post('/answer', authenticate, async (req, res) => {
   }
 });
 
-// POST /api/attempts/complete — hoàn thành lượt làm
 router.post('/complete', authenticate, async (req, res) => {
   try {
     const { attemptId, score } = req.body;
     const userId = req.user.id;
-    const parsedScore = parseInt(score);
+    const parsedScore = parseInt(score, 10);
 
     const attempt = await prisma.attempt.findFirst({
-      where: { id: parseInt(attemptId), userId, isComplete: false },
+      where: { id: parseInt(attemptId, 10), userId, isComplete: false },
     });
     if (!attempt) return res.status(404).json({ error: 'Không tìm thấy lượt làm' });
 
     const updated = await prisma.attempt.update({
       where: { id: attempt.id },
-      data: { score: isNaN(parsedScore) ? 0 : parsedScore, isComplete: true },
+      data: { score: Number.isNaN(parsedScore) ? 0 : parsedScore, isComplete: true },
     });
 
     const allAttempts = await prisma.attempt.findMany({
@@ -84,26 +152,24 @@ router.post('/complete', authenticate, async (req, res) => {
       orderBy: { createdAt: 'asc' },
     });
 
-    const total = allAttempts.reduce((sum, a) => sum + a.score, 0);
-    const avgScore = parseFloat((total / allAttempts.length).toFixed(2));
+    const summary = buildAttemptSummary(allAttempts);
 
-    res.json({ attempt: updated, avgScore, attemptCount: allAttempts.length });
+    res.json({ attempt: updated, avgScore: summary.avgScore, attemptCount: summary.attemptCount });
   } catch (error) {
     console.error('Complete attempt error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// GET /api/attempts/progress?examId= — lấy tiến độ đang làm dở
 router.get('/progress', authenticate, async (req, res) => {
   try {
-    const { examId } = req.query;
+    const examId = parseInt(req.query.examId, 10);
     const userId = req.user.id;
 
-    if (!examId) return res.status(400).json({ error: 'examId là bắt buộc' });
+    if (Number.isNaN(examId)) return res.status(400).json({ error: 'examId là bắt buộc' });
 
     const attempt = await prisma.attempt.findFirst({
-      where: { userId, examId: parseInt(examId), isComplete: false },
+      where: { userId, examId, isComplete: false },
       include: {
         nodeAnswers: { select: { nodeId: true, answer: true, isCorrect: true } },
       },
@@ -122,24 +188,55 @@ router.get('/progress', authenticate, async (req, res) => {
   }
 });
 
-// POST /api/attempts/submit — nộp bài (backward compat)
+router.get('/review', authenticate, async (req, res) => {
+  try {
+    const examId = parseInt(req.query.examId, 10);
+    if (Number.isNaN(examId)) return res.status(400).json({ error: 'examId là bắt buộc' });
+
+    const attempt = await prisma.attempt.findFirst({
+      where: {
+        userId: req.user.id,
+        examId,
+        isComplete: true,
+      },
+      include: {
+        nodeAnswers: {
+          select: {
+            nodeId: true,
+            answer: true,
+            isCorrect: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!attempt) return res.status(404).json({ error: 'Chưa có bài làm hoàn thành để xem lại' });
+
+    res.json({
+      attemptId: attempt.id,
+      score: attempt.score,
+      nodeAnswers: attempt.nodeAnswers,
+      createdAt: attempt.createdAt,
+    });
+  } catch (error) {
+    console.error('Review attempt error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.post('/submit', authenticate, async (req, res) => {
   try {
     const { examId, score } = req.body;
     const userId = req.user.id;
+    const parsedExamId = parseInt(examId, 10);
+    const parsedScore = parseInt(score, 10);
 
-    if (examId === undefined || score === undefined) {
-      return res.status(400).json({ error: 'examId và score là bắt buộc' });
-    }
-
-    const parsedExamId = parseInt(examId);
-    const parsedScore = parseInt(score);
-
-    if (isNaN(parsedExamId) || isNaN(parsedScore)) {
+    if (Number.isNaN(parsedExamId) || Number.isNaN(parsedScore)) {
       return res.status(400).json({ error: 'examId và score phải là số' });
     }
 
-    const exam = await prisma.exam.findUnique({ where: { id: parsedExamId } });
+    const exam = await findAccessibleExam(parsedExamId, userId, req.user.role);
     if (!exam) return res.status(404).json({ error: 'Không tìm thấy bài tập' });
 
     const attempt = await prisma.attempt.create({
@@ -151,157 +248,243 @@ router.post('/submit', authenticate, async (req, res) => {
       orderBy: { createdAt: 'asc' },
     });
 
-    const total = allAttempts.reduce((sum, a) => sum + a.score, 0);
-    const avgScore = parseFloat((total / allAttempts.length).toFixed(2));
+    const summary = buildAttemptSummary(allAttempts);
 
-    res.status(201).json({ attempt, avgScore, attemptCount: allAttempts.length });
+    res.status(201).json({ attempt, avgScore: summary.avgScore, attemptCount: summary.attemptCount });
   } catch (error) {
     console.error('Submit attempt error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// GET /api/attempts/my?examId= — lịch sử làm bài của học sinh
 router.get('/my', authenticate, async (req, res) => {
   try {
-    const { examId } = req.query;
+    const examId = req.query.examId ? parseInt(req.query.examId, 10) : null;
     const userId = req.user.id;
 
-    const where = { userId, isComplete: true };
-    if (examId) where.examId = parseInt(examId);
+    const where = { userId };
+    if (examId) where.examId = examId;
 
     const attempts = await prisma.attempt.findMany({
       where,
-      orderBy: { createdAt: 'desc' },
-      include: { exam: { select: { title: true } } },
+      orderBy: { createdAt: 'asc' },
+      include: {
+        exam: {
+          include: {
+            lesson: {
+              include: {
+                chapter: {
+                  include: {
+                    grade: true,
+                  },
+                },
+              },
+            },
+            assignments: {
+              include: {
+                studentClass: {
+                  include: { school: true, grade: true },
+                },
+              },
+            },
+            _count: { select: { nodes: true } },
+          },
+        },
+      },
     });
 
-    // Kiểm tra có bài đang làm dở không
-    const inProgressQuery = { userId, isComplete: false };
-    if (examId) inProgressQuery.examId = parseInt(examId);
-    const inProgressAttempts = await prisma.attempt.findMany({
-      where: inProgressQuery,
-      select: { examId: true },
+    const grouped = {};
+    attempts.forEach((attempt) => {
+      if (!grouped[attempt.examId]) {
+        grouped[attempt.examId] = {
+          exam: serializeLessonExam(attempt.exam),
+          completed: [],
+          inProgress: [],
+        };
+      }
+
+      if (attempt.isComplete) grouped[attempt.examId].completed.push(attempt);
+      else grouped[attempt.examId].inProgress.push(attempt);
     });
-    const inProgressExamIds = new Set(inProgressAttempts.map((a) => a.examId));
 
-    const examIds = [...new Set(attempts.map((a) => a.examId))];
-    const avgByExam = {};
-    for (const eid of examIds) {
-      const ea = attempts.filter((a) => a.examId === eid);
-      const total = ea.reduce((s, a) => s + a.score, 0);
-      avgByExam[eid] = parseFloat((total / ea.length).toFixed(2));
-    }
+    const lessons = Object.values(grouped).map((item) => {
+      const summary = buildAttemptSummary(item.completed);
+      return {
+        ...item.exam,
+        attemptSummary: {
+          ...summary,
+          status: item.inProgress.length > 0
+            ? 'IN_PROGRESS'
+            : item.completed.length > 0
+              ? 'COMPLETED'
+              : 'NOT_STARTED',
+          canReview: item.inProgress.length === 0 && item.completed.length > 0,
+        },
+      };
+    });
 
-    res.json({ attempts, avgByExam, inProgressExamIds: [...inProgressExamIds] });
+    res.json({ lessons });
   } catch (error) {
     console.error('Get my attempts error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// GET /api/attempts/stats?className= — thống kê theo lớp (giáo viên)
-router.get('/stats', authenticate, requireRole('TEACHER'), async (req, res) => {
+router.get('/stats', authenticate, requireRole('TEACHER'), async (_req, res) => {
   try {
-    const { className } = req.query;
-
-    const studentWhere = { role: 'STUDENT' };
-    if (className) studentWhere.className = className;
-
     const students = await prisma.user.findMany({
-      where: studentWhere,
-      select: { id: true, username: true, fullName: true, className: true },
-      orderBy: [{ className: 'asc' }, { fullName: 'asc' }],
+      where: { role: 'STUDENT' },
+      include: {
+        studentClass: {
+          include: {
+            school: true,
+            grade: true,
+          },
+        },
+      },
+      orderBy: { fullName: 'asc' },
     });
 
     const exams = await prisma.exam.findMany({
-      select: { id: true, title: true },
+      include: {
+        lesson: {
+          include: {
+            chapter: {
+              include: {
+                grade: true,
+              },
+            },
+          },
+        },
+        assignments: {
+          include: {
+            studentClass: {
+              include: { school: true, grade: true },
+            },
+          },
+        },
+        _count: { select: { nodes: true } },
+      },
+    });
+
+    const serializedLessons = exams.map((exam) => serializeLessonExam(exam));
+    const attempts = await prisma.attempt.findMany({
+      where: {
+        userId: { in: students.map((student) => student.id) },
+      },
       orderBy: { createdAt: 'asc' },
     });
 
-    const studentIds = students.map((s) => s.id);
-    const allAttempts = await prisma.attempt.findMany({
-      where: { userId: { in: studentIds }, isComplete: true },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    const stats = students.map((student) => {
-      const examStats = exams.map((exam) => {
-        const ea = allAttempts.filter(
-          (a) => a.userId === student.id && a.examId === exam.id
+    const rows = students.map((student) => {
+      const studentAttempts = attempts.filter((attempt) => attempt.userId === student.id);
+      const lessonStats = serializedLessons.map((lesson) => {
+        const completed = studentAttempts.filter(
+          (attempt) => attempt.examId === lesson.id && attempt.isComplete
         );
-        const count = ea.length;
-        const avgScore =
-          count > 0
-            ? parseFloat((ea.reduce((s, a) => s + a.score, 0) / count).toFixed(2))
-            : null;
-        return { examId: exam.id, examTitle: exam.title, attemptCount: count, avgScore };
+        const inProgress = studentAttempts.filter(
+          (attempt) => attempt.examId === lesson.id && !attempt.isComplete
+        );
+        const summary = buildAttemptSummary(completed);
+
+        return {
+          examId: lesson.id,
+          status: inProgress.length > 0 ? 'IN_PROGRESS' : completed.length > 0 ? 'COMPLETED' : 'NOT_STARTED',
+          ...summary,
+        };
       });
 
       return {
         studentId: student.id,
-        username: student.username,
         fullName: student.fullName,
-        className: student.className,
-        examStats,
+        username: student.username,
+        className: student.studentClass?.name ?? '',
+        school: student.studentClass?.school?.name ?? '',
+        gradeLevel: student.studentClass?.grade?.code ?? '',
+        lessonStats,
       };
     });
 
-    const classRows = await prisma.user.findMany({
-      where: { role: 'STUDENT' },
-      select: { className: true },
-      distinct: ['className'],
-      orderBy: { className: 'asc' },
+    const classes = await prisma.studentClass.findMany({
+      include: {
+        grade: true,
+        school: true,
+        _count: { select: { students: true } },
+      },
     });
-    const classes = classRows.map((c) => c.className).filter(Boolean);
 
-    res.json({ stats, classes, exams });
+    res.json({
+      rows: rows.sort((a, b) =>
+        (a.gradeLevel || '').localeCompare(b.gradeLevel || '', 'vi') ||
+        (a.className || '').localeCompare(b.className || '', 'vi') ||
+        a.fullName.localeCompare(b.fullName, 'vi')
+      ),
+      classes: classes
+        .sort((a, b) =>
+          (a.grade?.code || '').localeCompare(b.grade?.code || '', 'vi') ||
+          a.name.localeCompare(b.name, 'vi')
+        )
+        .map((studentClass) => ({
+        id: studentClass.id,
+        name: studentClass.name,
+        school: studentClass.school?.name ?? '',
+        gradeLevel: studentClass.grade.code,
+        studentCount: studentClass._count.students,
+      })),
+      lessons: serializedLessons,
+    });
   } catch (error) {
     console.error('Stats error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// GET /api/attempts/node-stats?examId=&className= — thống kê từng node (giáo viên)
 router.get('/node-stats', authenticate, requireRole('TEACHER'), async (req, res) => {
   try {
-    const { examId, className } = req.query;
-    if (!examId) return res.status(400).json({ error: 'examId là bắt buộc' });
+    const examId = parseInt(req.query.examId, 10);
+    const className = req.query.className;
+    if (Number.isNaN(examId)) return res.status(400).json({ error: 'examId là bắt buộc' });
 
-    const parsedExamId = parseInt(examId);
     const exam = await prisma.exam.findUnique({
-      where: { id: parsedExamId },
-      include: { nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] } },
+      where: { id: examId },
+      include: {
+        lesson: {
+          include: {
+            chapter: {
+              include: {
+                grade: true,
+              },
+            },
+          },
+        },
+        nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] },
+      },
     });
     if (!exam) return res.status(404).json({ error: 'Không tìm thấy bài tập' });
 
-    // Lấy danh sách student phù hợp
-    const studentWhere = { role: 'STUDENT' };
-    if (className) studentWhere.className = className;
     const students = await prisma.user.findMany({
-      where: studentWhere,
-      select: { id: true },
+      where: {
+        role: 'STUDENT',
+        ...(className ? { studentClass: { name: className } } : {}),
+      },
+      select: { id: true, studentClass: { select: { name: true } } },
     });
-    const studentIds = students.map((s) => s.id);
+    const studentIds = students.map((student) => student.id);
 
-    // Lấy tất cả attempt hoàn thành của bài này
     const attempts = await prisma.attempt.findMany({
-      where: { examId: parsedExamId, userId: { in: studentIds }, isComplete: true },
+      where: { examId, userId: { in: studentIds }, isComplete: true },
       select: { id: true },
     });
-    const attemptIds = attempts.map((a) => a.id);
+    const attemptIds = attempts.map((attempt) => attempt.id);
 
-    // Lấy tất cả nodeAnswer
     const nodeAnswers = await prisma.nodeAnswer.findMany({
       where: { attemptId: { in: attemptIds } },
       select: { nodeId: true, isCorrect: true },
     });
 
-    // Tổng hợp theo node
     const nodeStats = exam.nodes.map((node) => {
-      const answers = nodeAnswers.filter((na) => na.nodeId === node.id);
+      const answers = nodeAnswers.filter((item) => item.nodeId === node.id);
       const total = answers.length;
-      const correct = answers.filter((a) => a.isCorrect).length;
+      const correct = answers.filter((item) => item.isCorrect).length;
       const incorrect = total - correct;
       return {
         nodeId: node.id,
@@ -314,36 +497,16 @@ router.get('/node-stats', authenticate, requireRole('TEACHER'), async (req, res)
       };
     });
 
-    // Thống kê tổng hợp theo lớp
-    const classRows = await prisma.user.findMany({
-      where: { role: 'STUDENT' },
-      select: { className: true },
-      distinct: ['className'],
-      orderBy: { className: 'asc' },
+    res.json({
+      exam: {
+        id: exam.id,
+        title: exam.title,
+        lessonTitle: exam.lesson.title,
+        chapterTitle: exam.lesson.chapter.title,
+        gradeLevel: exam.lesson.chapter.grade.code,
+      },
+      nodeStats,
     });
-    const classes = classRows.map((c) => c.className).filter(Boolean);
-
-    // Avg score theo lớp
-    const classStats = await Promise.all(
-      classes.map(async (cls) => {
-        const clsStudents = await prisma.user.findMany({
-          where: { role: 'STUDENT', className: cls },
-          select: { id: true },
-        });
-        const clsIds = clsStudents.map((s) => s.id);
-        const clsAttempts = await prisma.attempt.findMany({
-          where: { examId: parsedExamId, userId: { in: clsIds }, isComplete: true },
-          select: { score: true, userId: true },
-        });
-        const avgScore =
-          clsAttempts.length > 0
-            ? parseFloat((clsAttempts.reduce((s, a) => s + a.score, 0) / clsAttempts.length).toFixed(2))
-            : null;
-        return { className: cls, attemptCount: clsAttempts.length, avgScore };
-      })
-    );
-
-    res.json({ exam: { id: exam.id, title: exam.title }, nodeStats, classStats, classes });
   } catch (error) {
     console.error('Node stats error:', error);
     res.status(500).json({ error: 'Internal server error' });

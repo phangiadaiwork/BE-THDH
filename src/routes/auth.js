@@ -2,11 +2,11 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
+const { serializeStudent } = require('../utils/education');
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// POST /api/auth/login
 router.post('/login', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -15,7 +15,18 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Tên đăng nhập và mật khẩu là bắt buộc' });
     }
 
-    const user = await prisma.user.findUnique({ where: { username } });
+    const user = await prisma.user.findUnique({
+      where: { username: String(username).trim() },
+      include: {
+        studentClass: {
+          include: {
+            school: true,
+            grade: true,
+          },
+        },
+      },
+    });
+
     if (!user) {
       return res.status(401).json({ error: 'Tên đăng nhập hoặc mật khẩu không đúng' });
     }
@@ -33,14 +44,7 @@ router.post('/login', async (req, res) => {
 
     res.json({
       token,
-      user: {
-        id: user.id,
-        username: user.username,
-        fullName: user.fullName,
-        role: user.role,
-        className: user.className,
-        school: user.school,
-      },
+      user: serializeStudent(user),
     });
   } catch (error) {
     console.error('Login error:', error);

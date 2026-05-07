@@ -4,12 +4,38 @@ const multer = require('multer');
 const xlsx = require('xlsx');
 const { PrismaClient } = require('@prisma/client');
 const { authenticate, requireRole } = require('../middleware/auth');
+const { ensureStudentClass, normalizeText, serializeStudent } = require('../utils/education');
 
 const router = express.Router();
 const prisma = new PrismaClient();
 const upload = multer({ storage: multer.memoryStorage() });
 
-// POST /api/students/bulk — tạo học sinh hàng loạt từ JSON
+async function createStudentRecord(student) {
+  const { username, password, fullName, className, school } = student;
+  const hashed = await bcrypt.hash(password, 10);
+  const studentClass = await ensureStudentClass(prisma, className, school);
+
+  const user = await prisma.user.create({
+    data: {
+      username: normalizeText(username),
+      password: hashed,
+      fullName: normalizeText(fullName),
+      classId: studentClass?.id ?? null,
+      role: 'STUDENT',
+    },
+    include: {
+      studentClass: {
+        include: {
+          school: true,
+          grade: true,
+        },
+      },
+    },
+  });
+
+  return serializeStudent(user);
+}
+
 router.post('/bulk', authenticate, requireRole('TEACHER'), async (req, res) => {
   try {
     const { students } = req.body;
@@ -22,7 +48,9 @@ router.post('/bulk', authenticate, requireRole('TEACHER'), async (req, res) => {
     const errors = [];
 
     for (const student of students) {
-      const { username, password, fullName, className, school } = student;
+      const username = normalizeText(student.username);
+      const password = normalizeText(student.password);
+      const fullName = normalizeText(student.fullName);
 
       if (!username || !password || !fullName) {
         errors.push({ username: username || '?', error: 'Thiếu trường bắt buộc' });
@@ -30,23 +58,7 @@ router.post('/bulk', authenticate, requireRole('TEACHER'), async (req, res) => {
       }
 
       try {
-        const hashed = await bcrypt.hash(password, 10);
-        const newUser = await prisma.user.create({
-          data: {
-            username: username.trim(),
-            password: hashed,
-            fullName: fullName.trim(),
-            className: (className || '').trim(),
-            school: (school || '').trim(),
-            role: 'STUDENT',
-          },
-        });
-        created.push({
-          id: newUser.id,
-          username: newUser.username,
-          fullName: newUser.fullName,
-          className: newUser.className,
-        });
+        created.push(await createStudentRecord(student));
       } catch (err) {
         if (err.code === 'P2002') {
           errors.push({ username, error: 'Tên đăng nhập đã tồn tại' });
@@ -63,14 +75,13 @@ router.post('/bulk', authenticate, requireRole('TEACHER'), async (req, res) => {
   }
 });
 
-// GET /api/students/template — tải file Excel mẫu
-router.get('/template', authenticate, requireRole('TEACHER'), (req, res) => {
+router.get('/template', authenticate, requireRole('TEACHER'), (_req, res) => {
   const wb = xlsx.utils.book_new();
   const ws = xlsx.utils.aoa_to_sheet([
     ['username', 'password', 'fullName', 'className', 'school'],
     ['hs001', 'matkhau123', 'Nguyễn Văn A', '10A1', 'THPT Lê Lợi'],
-    ['hs002', 'matkhau456', 'Trần Thị B', '10A1', 'THPT Lê Lợi'],
-    ['hs003', 'matkhau789', 'Lê Văn C', '10A2', 'THPT Lê Lợi'],
+    ['hs002', 'matkhau456', 'Trần Thị B', '11A1', 'THPT Lê Lợi'],
+    ['hs003', 'matkhau789', 'Lê Văn C', '12A1', 'THPT Lê Lợi'],
   ]);
   ws['!cols'] = [{ wch: 14 }, { wch: 14 }, { wch: 22 }, { wch: 10 }, { wch: 20 }];
   xlsx.utils.book_append_sheet(wb, ws, 'HocSinh');
@@ -80,7 +91,6 @@ router.get('/template', authenticate, requireRole('TEACHER'), (req, res) => {
   res.send(buf);
 });
 
-// POST /api/students/import — import từ file Excel
 router.post('/import', authenticate, requireRole('TEACHER'), upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Cần upload file Excel' });
@@ -91,31 +101,30 @@ router.post('/import', authenticate, requireRole('TEACHER'), upload.single('file
 
     if (rows.length === 0) return res.status(400).json({ error: 'File không có dữ liệu' });
 
-    const students = rows.map((r) => ({
-      username: String(r.username || '').trim(),
-      password: String(r.password || '').trim(),
-      fullName: String(r.fullName || '').trim(),
-      className: String(r.className || '').trim(),
-      school: String(r.school || '').trim(),
-    }));
-
     const created = [];
     const errors = [];
 
-    for (const student of students) {
-      const { username, password, fullName, className, school } = student;
-      if (!username || !password || !fullName) {
-        errors.push({ username: username || '?', error: 'Thiếu trường bắt buộc' });
+    for (const row of rows) {
+      const student = {
+        username: normalizeText(row.username),
+        password: normalizeText(row.password),
+        fullName: normalizeText(row.fullName),
+        className: normalizeText(row.className),
+        school: normalizeText(row.school),
+      };
+
+      if (!student.username || !student.password || !student.fullName) {
+        errors.push({ username: student.username || '?', error: 'Thiếu trường bắt buộc' });
         continue;
       }
+
       try {
-        const hashed = await bcrypt.hash(password, 10);
-        const newUser = await prisma.user.create({
-          data: { username, password: hashed, fullName, className, school, role: 'STUDENT' },
-        });
-        created.push({ id: newUser.id, username: newUser.username, fullName: newUser.fullName, className: newUser.className });
+        created.push(await createStudentRecord(student));
       } catch (err) {
-        errors.push({ username, error: err.code === 'P2002' ? 'Tên đăng nhập đã tồn tại' : err.message });
+        errors.push({
+          username: student.username,
+          error: err.code === 'P2002' ? 'Tên đăng nhập đã tồn tại' : err.message,
+        });
       }
     }
 
@@ -126,56 +135,79 @@ router.post('/import', authenticate, requireRole('TEACHER'), upload.single('file
   }
 });
 
-// GET /api/students — danh sách học sinh
-router.get('/', authenticate, requireRole('TEACHER'), async (req, res) => {
+router.get('/', authenticate, requireRole('TEACHER'), async (_req, res) => {
   try {
     const students = await prisma.user.findMany({
       where: { role: 'STUDENT' },
-      select: {
-        id: true,
-        username: true,
-        fullName: true,
-        className: true,
-        school: true,
-        createdAt: true,
+      include: {
+        studentClass: {
+          include: {
+            school: true,
+            grade: true,
+          },
+        },
       },
-      orderBy: [{ className: 'asc' }, { fullName: 'asc' }],
+      orderBy: { fullName: 'asc' },
     });
-    res.json(students);
+
+    res.json(
+      students
+        .sort((a, b) =>
+          (a.studentClass?.grade?.code || '').localeCompare(b.studentClass?.grade?.code || '', 'vi') ||
+          (a.studentClass?.name || '').localeCompare(b.studentClass?.name || '', 'vi') ||
+          a.fullName.localeCompare(b.fullName, 'vi')
+        )
+        .map((student) => ({
+          ...serializeStudent(student),
+          createdAt: student.createdAt,
+        }))
+    );
   } catch (error) {
     console.error('Get students error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// PUT /api/students/:id — cập nhật thông tin học sinh
 router.put('/:id', authenticate, requireRole('TEACHER'), async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(req.params.id, 10);
     const { fullName, className, school, username } = req.body;
 
     const data = {};
-    if (fullName !== undefined) data.fullName = fullName.trim();
-    if (className !== undefined) data.className = className.trim();
-    if (school !== undefined) data.school = school.trim();
-    if (username !== undefined) data.username = username.trim();
+    if (fullName !== undefined) data.fullName = normalizeText(fullName);
+    if (username !== undefined) data.username = normalizeText(username);
+    if (className !== undefined || school !== undefined) {
+      const studentClass = await ensureStudentClass(
+        prisma,
+        className,
+        school
+      );
+      data.classId = studentClass?.id ?? null;
+    }
 
     const updated = await prisma.user.update({
       where: { id },
       data,
-      select: { id: true, username: true, fullName: true, className: true, school: true },
+      include: {
+        studentClass: {
+          include: {
+            school: true,
+            grade: true,
+          },
+        },
+      },
     });
-    res.json(updated);
+
+    res.json(serializeStudent(updated));
   } catch (error) {
     if (error.code === 'P2002') return res.status(400).json({ error: 'Tên đăng nhập đã tồn tại' });
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// PUT /api/students/:id/reset-password — đặt lại mật khẩu
 router.put('/:id/reset-password', authenticate, requireRole('TEACHER'), async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(req.params.id, 10);
     const { newPassword } = req.body;
 
     if (!newPassword || newPassword.length < 6) {
@@ -190,10 +222,9 @@ router.put('/:id/reset-password', authenticate, requireRole('TEACHER'), async (r
   }
 });
 
-// DELETE /api/students/:id
 router.delete('/:id', authenticate, requireRole('TEACHER'), async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(req.params.id, 10);
     await prisma.user.delete({ where: { id } });
     res.json({ message: 'Đã xóa học sinh' });
   } catch (error) {

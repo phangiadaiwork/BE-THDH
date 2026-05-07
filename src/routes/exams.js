@@ -3,36 +3,225 @@ const multer = require('multer');
 const xlsx = require('xlsx');
 const { PrismaClient } = require('@prisma/client');
 const { authenticate, requireRole } = require('../middleware/auth');
+const {
+  ensureGrade,
+  normalizeText,
+  serializeLessonExam,
+} = require('../utils/education');
 
 const router = express.Router();
 const prisma = new PrismaClient();
 const upload = multer({ storage: multer.memoryStorage() });
 
-// POST /api/exams — tạo bài tập kèm cây node
+function parseOptionalInt(value) {
+  const parsed = parseInt(value, 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+async function ensureChapterAndLesson(body) {
+  const gradeCode = normalizeText(body.gradeLevel, '12');
+  const grade = await ensureGrade(prisma, gradeCode);
+
+  const chapterCode = normalizeText(
+    body.chapterCode || body.chapterKey || body.chapterTitle?.toLowerCase().replace(/\s+/g, '-'),
+    'chuong-1'
+  );
+  const chapterTitle = normalizeText(body.chapterTitle, 'Chương I');
+  const chapterDisplayOrder = parseOptionalInt(body.chapterDisplayOrder) ?? 0;
+
+  const chapter = await prisma.chapter.upsert({
+    where: { gradeId_code: { gradeId: grade.id, code: chapterCode } },
+    update: {
+      title: chapterTitle,
+      displayOrder: chapterDisplayOrder,
+    },
+    create: {
+      gradeId: grade.id,
+      code: chapterCode,
+      title: chapterTitle,
+      displayOrder: chapterDisplayOrder,
+    },
+  });
+
+  const lessonTitle = normalizeText(body.lessonTitle || body.title, 'Bài học');
+  const lessonNumber = parseOptionalInt(body.lessonNumber);
+  const displayOrder = parseOptionalInt(body.displayOrder) ?? lessonNumber ?? 0;
+
+  const existingLesson = await prisma.lesson.findFirst({
+    where: {
+      chapterId: chapter.id,
+      OR: [
+        { title: lessonTitle },
+        ...(lessonNumber === null ? [] : [{ number: lessonNumber }]),
+      ],
+    },
+    include: { exam: true },
+  });
+
+  if (existingLesson?.exam) {
+    const error = new Error('Bài học này đã có bài tập');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (existingLesson) {
+    return prisma.lesson.update({
+      where: { id: existingLesson.id },
+      data: {
+        number: lessonNumber,
+        title: lessonTitle,
+        theoryContent: String(body.theoryContent ?? '').trim(),
+        displayOrder,
+      },
+    });
+  }
+
+  return prisma.lesson.create({
+    data: {
+      chapterId: chapter.id,
+      number: lessonNumber,
+      title: lessonTitle,
+      theoryContent: String(body.theoryContent ?? '').trim(),
+      displayOrder,
+    },
+  });
+}
+
+async function findVisibleClassIds(examId) {
+  const assignments = await prisma.examAssignment.findMany({
+    where: { examId },
+    select: { classId: true },
+  });
+  return new Set(assignments.map((item) => item.classId));
+}
+
+async function buildExamWhereForUser(userId, role) {
+  if (role !== 'STUDENT') return {};
+
+  const student = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { classId: true },
+  });
+
+  if (!student?.classId) {
+    return { isPublic: true };
+  }
+
+  return {
+    OR: [
+      { isPublic: true },
+      { assignments: { some: { classId: student.classId } } },
+    ],
+  };
+}
+
+async function fetchExamList(where = {}) {
+  const exams = await prisma.exam.findMany({
+    where,
+    include: {
+      lesson: {
+        include: {
+          chapter: {
+            include: {
+              grade: true,
+            },
+          },
+        },
+      },
+      assignments: {
+        include: {
+          studentClass: {
+            include: {
+              school: true,
+              grade: true,
+            },
+          },
+        },
+      },
+      _count: {
+        select: { nodes: true },
+      },
+    },
+  });
+
+  return exams
+    .map((exam) => serializeLessonExam(exam))
+    .sort((a, b) =>
+      a.gradeLevel.localeCompare(b.gradeLevel, 'vi') ||
+      a.chapterDisplayOrder - b.chapterDisplayOrder ||
+      a.lessonDisplayOrder - b.lessonDisplayOrder ||
+      (a.lessonNumber ?? 999) - (b.lessonNumber ?? 999) ||
+      a.lessonTitle.localeCompare(b.lessonTitle, 'vi')
+    );
+}
+
+function summarizeAttempts(attempts) {
+  const grouped = {};
+
+  attempts.forEach((attempt) => {
+    if (!grouped[attempt.examId]) {
+      grouped[attempt.examId] = {
+        completed: [],
+        inProgress: [],
+      };
+    }
+
+    if (attempt.isComplete) grouped[attempt.examId].completed.push(attempt);
+    else grouped[attempt.examId].inProgress.push(attempt);
+  });
+
+  const result = {};
+  Object.entries(grouped).forEach(([examId, item]) => {
+    const completed = item.completed;
+    const total = completed.reduce((sum, attempt) => sum + attempt.score, 0);
+    const bestScore = completed.length > 0 ? Math.max(...completed.map((attempt) => attempt.score)) : null;
+    const lastAttempt = completed.length > 0 ? completed[completed.length - 1] : null;
+
+    result[parseInt(examId, 10)] = {
+      status: item.inProgress.length > 0 ? 'IN_PROGRESS' : completed.length > 0 ? 'COMPLETED' : 'NOT_STARTED',
+      attemptCount: completed.length,
+      avgScore: completed.length > 0 ? parseFloat((total / completed.length).toFixed(2)) : null,
+      bestScore,
+      lastScore: lastAttempt?.score ?? null,
+      lastCompletedAt: lastAttempt?.createdAt ?? null,
+      canReview: item.inProgress.length === 0 && completed.length > 0,
+    };
+  });
+
+  return result;
+}
+
 router.post('/', authenticate, requireRole('TEACHER'), async (req, res) => {
   try {
-    const { title, nodes } = req.body;
+    const { nodes } = req.body;
 
-    if (!title || !title.trim()) {
-      return res.status(400).json({ error: 'Tiêu đề bài tập là bắt buộc' });
-    }
     if (!Array.isArray(nodes) || nodes.length === 0) {
       return res.status(400).json({ error: 'Cần ít nhất một node' });
     }
 
-    const exam = await prisma.exam.create({ data: { title: title.trim() } });
+    const lesson = await ensureChapterAndLesson(req.body);
+    const exam = await prisma.exam.create({
+      data: {
+        lessonId: lesson.id,
+        title: normalizeText(req.body.title || lesson.title, lesson.title),
+        exerciseTitle: normalizeText(req.body.exerciseTitle, 'Bài tập'),
+        isPublic: req.body.isPublic === undefined ? true : Boolean(req.body.isPublic),
+      },
+    });
 
     const nodesById = {};
-    nodes.forEach((n) => { nodesById[n.tempId] = n; });
+    nodes.forEach((node) => {
+      nodesById[node.tempId] = node;
+    });
 
-    const roots = nodes.filter((n) => !n.parentTempId);
+    const roots = nodes.filter((node) => !node.parentTempId);
     if (roots.length === 0) {
       await prisma.exam.delete({ where: { id: exam.id } });
       return res.status(400).json({ error: 'Không tìm thấy node gốc' });
     }
 
     const idMap = {};
-    const queue = roots.map((r) => r.tempId);
+    const queue = roots.map((root) => root.tempId);
     const processed = new Set();
 
     while (queue.length > 0) {
@@ -47,14 +236,14 @@ router.post('/', authenticate, requireRole('TEACHER'), async (req, res) => {
       const created = await prisma.mindNode.create({
         data: {
           examId: exam.id,
-          parentId: parentId ?? null,
-          label: (node.label || '').trim(),
-          question: (node.question || '').trim(),
+          parentId,
+          label: normalizeText(node.label),
+          question: normalizeText(node.question),
           options: node.options || null,
-          correctAnswer: (node.correctAnswer || '').trim(),
-          hint: (node.hint || '').trim(),
-          points: Math.max(1, parseInt(node.points) || 1),
-          order: parseInt(node.order) || 0,
+          correctAnswer: normalizeText(node.correctAnswer),
+          hint: normalizeText(node.hint),
+          points: Math.max(1, parseInt(node.points, 10) || 1),
+          order: parseInt(node.order, 10) || 0,
         },
       });
 
@@ -62,32 +251,51 @@ router.post('/', authenticate, requireRole('TEACHER'), async (req, res) => {
       processed.add(tempId);
 
       const children = nodes.filter(
-        (n) => n.parentTempId === tempId && !processed.has(n.tempId)
+        (item) => item.parentTempId === tempId && !processed.has(item.tempId)
       );
-      queue.push(...children.map((c) => c.tempId));
+      queue.push(...children.map((child) => child.tempId));
     }
 
     const fullExam = await prisma.exam.findUnique({
       where: { id: exam.id },
-      include: { nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] } },
+      include: {
+        lesson: {
+          include: {
+            chapter: {
+              include: {
+                grade: true,
+              },
+            },
+          },
+        },
+        assignments: {
+          include: {
+            studentClass: {
+              include: { school: true, grade: true },
+            },
+          },
+        },
+        nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] },
+        _count: { select: { nodes: true } },
+      },
     });
 
-    res.status(201).json(fullExam);
+    res.status(201).json({
+      ...serializeLessonExam(fullExam),
+      nodes: fullExam.nodes,
+    });
   } catch (error) {
     console.error('Create exam error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(error.statusCode || 500).json({ error: error.message || 'Internal server error' });
   }
 });
 
-// GET /api/exams/template — tải file Excel mẫu bài tập
-router.get('/template', authenticate, requireRole('TEACHER'), (req, res) => {
+router.get('/template', authenticate, requireRole('TEACHER'), (_req, res) => {
   const wb = xlsx.utils.book_new();
   const ws = xlsx.utils.aoa_to_sheet([
     ['nodeId', 'parentNodeId', 'label', 'question', 'optionA', 'optionB', 'optionC', 'optionD', 'correctAnswer', 'hint', 'points'],
     ['1', '', 'Chủ đề chính', 'Câu hỏi gốc?', 'Đáp án A', 'Đáp án B', 'Đáp án C', 'Đáp án D', 'A', 'Gợi ý...', '1'],
     ['2', '1', 'Nhánh 1', 'Câu hỏi nhánh 1?', 'Đáp án A', 'Đáp án B', 'Đáp án C', 'Đáp án D', 'B', '', '2'],
-    ['3', '1', 'Nhánh 2', 'Câu hỏi nhánh 2?', 'Đáp án A', 'Đáp án B', 'Đáp án C', 'Đáp án D', 'C', 'Gợi ý...', '1'],
-    ['4', '2', 'Nhánh 1.1', 'Câu hỏi con?', 'Đáp án A', 'Đáp án B', 'Đáp án C', 'Đáp án D', 'D', '', '3'],
   ]);
   ws['!cols'] = [{ wch: 8 }, { wch: 12 }, { wch: 16 }, { wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 20 }, { wch: 7 }];
   xlsx.utils.book_append_sheet(wb, ws, 'BaiTap');
@@ -97,13 +305,9 @@ router.get('/template', authenticate, requireRole('TEACHER'), (req, res) => {
   res.send(buf);
 });
 
-// POST /api/exams/import — import bài tập từ Excel
 router.post('/import', authenticate, requireRole('TEACHER'), upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Cần upload file Excel' });
-
-    const { title } = req.body;
-    if (!title || !title.trim()) return res.status(400).json({ error: 'Cần tiêu đề bài tập' });
 
     const wb = xlsx.read(req.file.buffer, { type: 'buffer' });
     const ws = wb.Sheets[wb.SheetNames[0]];
@@ -111,48 +315,45 @@ router.post('/import', authenticate, requireRole('TEACHER'), upload.single('file
 
     if (rows.length === 0) return res.status(400).json({ error: 'File không có dữ liệu' });
 
-    const exam = await prisma.exam.create({ data: { title: title.trim() } });
-
-    // Build nodes from rows
-    const rowMap = {};
-    rows.forEach((r) => {
-      const nodeId = String(r.nodeId || '').trim();
-      if (nodeId) rowMap[nodeId] = r;
+    req.body.title = req.body.title || req.body.lessonTitle;
+    const lesson = await ensureChapterAndLesson(req.body);
+    const exam = await prisma.exam.create({
+      data: {
+        lessonId: lesson.id,
+        title: normalizeText(req.body.title || lesson.title, lesson.title),
+        exerciseTitle: normalizeText(req.body.exerciseTitle, 'Bài tập'),
+        isPublic: req.body.isPublic === undefined ? true : Boolean(req.body.isPublic),
+      },
     });
 
     const idMap = {};
     const ordersPerParent = {};
 
-    // Process in order (assume rows are ordered parent-before-child)
-    for (const r of rows) {
-      const tempId = String(r.nodeId || '').trim();
+    for (const row of rows) {
+      const tempId = normalizeText(row.nodeId);
       if (!tempId) continue;
 
-      const parentTempId = String(r.parentNodeId || '').trim();
+      const parentTempId = normalizeText(row.parentNodeId);
       const parentId = parentTempId ? (idMap[parentTempId] ?? null) : null;
+      const orderKey = parentTempId || 'root';
+      if (!ordersPerParent[orderKey]) ordersPerParent[orderKey] = 0;
+      const order = ordersPerParent[orderKey]++;
 
-      if (!ordersPerParent[parentTempId || 'root']) ordersPerParent[parentTempId || 'root'] = 0;
-      const order = ordersPerParent[parentTempId || 'root']++;
-
-      const optA = String(r.optionA || '').trim();
-      const optB = String(r.optionB || '').trim();
-      const optC = String(r.optionC || '').trim();
-      const optD = String(r.optionD || '').trim();
-      const hasOptions = optA || optB || optC || optD;
-      const options = hasOptions
-        ? [optA, optB, optC, optD].filter(Boolean).map((o, i) => `${['A', 'B', 'C', 'D'][i]}. ${o}`)
-        : null;
+      const options = ['optionA', 'optionB', 'optionC', 'optionD']
+        .map((key) => normalizeText(row[key]))
+        .filter(Boolean)
+        .map((option, index) => `${['A', 'B', 'C', 'D'][index]}. ${option}`);
 
       const created = await prisma.mindNode.create({
         data: {
           examId: exam.id,
           parentId,
-          label: String(r.label || '').trim() || `Node ${tempId}`,
-          question: String(r.question || '').trim(),
-          options,
-          correctAnswer: String(r.correctAnswer || '').trim(),
-          hint: String(r.hint || '').trim(),
-          points: Math.max(1, parseInt(r.points) || 1),
+          label: normalizeText(row.label, `Node ${tempId}`),
+          question: normalizeText(row.question),
+          options: options.length > 0 ? options : null,
+          correctAnswer: normalizeText(row.correctAnswer),
+          hint: normalizeText(row.hint),
+          points: Math.max(1, parseInt(row.points, 10) || 1),
           order,
         },
       });
@@ -161,36 +362,75 @@ router.post('/import', authenticate, requireRole('TEACHER'), upload.single('file
 
     const fullExam = await prisma.exam.findUnique({
       where: { id: exam.id },
-      include: { nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] }, _count: { select: { nodes: true } } },
+      include: {
+        lesson: {
+          include: {
+            chapter: {
+              include: { grade: true },
+            },
+          },
+        },
+        assignments: {
+          include: {
+            studentClass: { include: { school: true, grade: true } },
+          },
+        },
+        nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] },
+        _count: { select: { nodes: true } },
+      },
     });
 
-    res.status(201).json(fullExam);
+    res.status(201).json({
+      ...serializeLessonExam(fullExam),
+      nodes: fullExam.nodes,
+    });
   } catch (error) {
     console.error('Import exam error:', error);
+    res.status(error.statusCode || 500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+router.get('/catalog', authenticate, async (req, res) => {
+  try {
+    const where = await buildExamWhereForUser(req.user.id, req.user.role);
+    const lessons = await fetchExamList(where);
+    let attemptSummaryByExam = {};
+
+    if (req.user.role === 'STUDENT' && lessons.length > 0) {
+      const attempts = await prisma.attempt.findMany({
+        where: {
+          userId: req.user.id,
+          examId: { in: lessons.map((lesson) => lesson.id) },
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+      attemptSummaryByExam = summarizeAttempts(attempts);
+    }
+
+    res.json({
+      lessons: lessons.map((lesson) => ({
+        ...lesson,
+        attemptSummary: attemptSummaryByExam[lesson.id] || {
+          status: 'NOT_STARTED',
+          attemptCount: 0,
+          avgScore: null,
+          bestScore: null,
+          lastScore: null,
+          lastCompletedAt: null,
+          canReview: false,
+        },
+      })),
+    });
+  } catch (error) {
+    console.error('Get catalog error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// GET /api/exams — danh sách bài tập (học sinh chỉ thấy bài được phân công)
 router.get('/', authenticate, async (req, res) => {
   try {
-    let where = {};
-
-    if (req.user.role === 'STUDENT') {
-      const userClass = req.user.className || '';
-      where = {
-        OR: [
-          { isPublic: true },
-          { visibleClasses: { has: userClass } },
-        ],
-      };
-    }
-
-    const exams = await prisma.exam.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-      include: { _count: { select: { nodes: true } } },
-    });
+    const where = await buildExamWhereForUser(req.user.id, req.user.role);
+    const exams = await fetchExamList(where);
     res.json(exams);
   } catch (error) {
     console.error('Get exams error:', error);
@@ -198,60 +438,102 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// GET /api/exams/:id — chi tiết bài tập
 router.get('/:id', authenticate, async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
-    if (isNaN(id)) return res.status(400).json({ error: 'ID không hợp lệ' });
+    const id = parseInt(req.params.id, 10);
+    if (Number.isNaN(id)) return res.status(400).json({ error: 'ID không hợp lệ' });
 
-    const exam = await prisma.exam.findUnique({
-      where: { id },
+    const where = await buildExamWhereForUser(req.user.id, req.user.role);
+    const exam = await prisma.exam.findFirst({
+      where: { id, ...where },
       include: {
+        lesson: {
+          include: {
+            chapter: {
+              include: { grade: true },
+            },
+          },
+        },
+        assignments: {
+          include: {
+            studentClass: { include: { school: true, grade: true } },
+          },
+        },
         nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] },
+        _count: { select: { nodes: true } },
       },
     });
 
-    if (!exam) return res.status(404).json({ error: 'Không tìm thấy bài tập' });
+    if (!exam) return res.status(404).json({ error: 'Không tìm thấy bài học' });
 
-    res.json(exam);
+    res.json({
+      ...serializeLessonExam(exam),
+      nodes: exam.nodes,
+    });
   } catch (error) {
     console.error('Get exam error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// PUT /api/exams/:id/visibility — cập nhật hiển thị bài tập theo lớp
 router.put('/:id/visibility', authenticate, requireRole('TEACHER'), async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
-    const { isPublic, visibleClasses } = req.body;
+    const id = parseInt(req.params.id, 10);
+    const { isPublic, visibleClasses = [] } = req.body;
 
-    const data = {};
-    if (isPublic !== undefined) data.isPublic = Boolean(isPublic);
-    if (Array.isArray(visibleClasses)) data.visibleClasses = visibleClasses.map(String);
+    const classRecords = visibleClasses.length > 0
+      ? await prisma.studentClass.findMany({
+          where: {
+            OR: [
+              { name: { in: visibleClasses.map((item) => normalizeText(item)) } },
+              { id: { in: visibleClasses.map((item) => parseInt(item, 10)).filter((item) => !Number.isNaN(item)) } },
+            ],
+          },
+        })
+      : [];
 
-    const exam = await prisma.exam.update({
+    await prisma.exam.update({
       where: { id },
-      data,
-      select: { id: true, title: true, isPublic: true, visibleClasses: true },
+      data: {
+        isPublic: Boolean(isPublic),
+        assignments: {
+          deleteMany: {},
+          create: classRecords.map((studentClass) => ({
+            classId: studentClass.id,
+          })),
+        },
+      },
     });
-    res.json(exam);
+
+    const exam = await prisma.exam.findUnique({
+      where: { id },
+      include: {
+        lesson: { include: { chapter: { include: { grade: true } } } },
+        assignments: {
+          include: {
+            studentClass: { include: { school: true, grade: true } },
+          },
+        },
+        _count: { select: { nodes: true } },
+      },
+    });
+
+    res.json(serializeLessonExam(exam));
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// DELETE /api/exams/:id
 router.delete('/:id', authenticate, requireRole('TEACHER'), async (req, res) => {
   try {
-    const id = parseInt(req.params.id);
-    if (isNaN(id)) return res.status(400).json({ error: 'ID không hợp lệ' });
+    const id = parseInt(req.params.id, 10);
+    if (Number.isNaN(id)) return res.status(400).json({ error: 'ID không hợp lệ' });
 
     await prisma.exam.delete({ where: { id } });
-    res.json({ message: 'Đã xóa bài tập' });
+    res.json({ message: 'Đã xóa bài học' });
   } catch (error) {
     if (error.code === 'P2025') {
-      return res.status(404).json({ error: 'Không tìm thấy bài tập' });
+      return res.status(404).json({ error: 'Không tìm thấy bài học' });
     }
     res.status(500).json({ error: 'Internal server error' });
   }

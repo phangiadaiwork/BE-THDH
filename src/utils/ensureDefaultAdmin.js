@@ -13,16 +13,14 @@ async function ensureDefaultAdmin() {
         password: hashedPassword,
         fullName: 'Giáo viên',
         role: 'TEACHER',
-        className: '',
-        school: '',
+        classId: null,
       },
       create: {
         username: 'admin',
         password: hashedPassword,
         fullName: 'Giáo viên',
         role: 'TEACHER',
-        className: '',
-        school: '',
+        classId: null,
       },
     });
 
