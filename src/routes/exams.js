@@ -182,8 +182,8 @@ async function ensureChapterAndLesson(payload) {
 async function buildExamWhereForUser(userId, role) {
   if (role !== 'STUDENT') return {};
 
-  const student = await prisma.user.findUnique({
-    where: { id: userId },
+  const student = await prisma.user.findFirst({
+    where: { id: userId, deletedAt: null },
     select: { classId: true },
   });
 
@@ -199,7 +199,7 @@ async function buildExamWhereForUser(userId, role) {
 
 async function fetchExamList(where = {}) {
   const exams = await prisma.exam.findMany({
-    where,
+    where: { ...where, deletedAt: null },
     include: {
       lesson: {
         include: {
@@ -449,7 +449,7 @@ router.get('/:id', authenticate, async (req, res) => {
 
     const where = await buildExamWhereForUser(req.user.id, req.user.role);
     const exam = await prisma.exam.findFirst({
-      where: { id, ...where },
+      where: { id, deletedAt: null, ...where },
       include: {
         lesson: { include: { chapter: { include: { grade: true } } } },
         assignments: {
@@ -490,6 +490,15 @@ router.put('/:id/visibility', authenticate, requireRole('TEACHER'), async (req, 
         })
       : [];
 
+    const existingExam = await prisma.exam.findFirst({
+      where: { id, deletedAt: null },
+      select: { id: true },
+    });
+
+    if (!existingExam) {
+      return res.status(404).json({ error: 'Không tìm thấy bài học' });
+    }
+
     await prisma.exam.update({
       where: { id },
       data: {
@@ -501,8 +510,8 @@ router.put('/:id/visibility', authenticate, requireRole('TEACHER'), async (req, 
       },
     });
 
-    const exam = await prisma.exam.findUnique({
-      where: { id },
+    const exam = await prisma.exam.findFirst({
+      where: { id, deletedAt: null },
       include: {
         lesson: { include: { chapter: { include: { grade: true } } } },
         assignments: {
@@ -525,12 +534,17 @@ router.delete('/:id', authenticate, requireRole('TEACHER'), async (req, res) => 
     const id = parseInt(req.params.id, 10);
     if (Number.isNaN(id)) return res.status(400).json({ error: 'ID không hợp lệ' });
 
-    await prisma.exam.delete({ where: { id } });
-    res.json({ message: 'Đã xóa bài học' });
-  } catch (error) {
-    if (error.code === 'P2025') {
+    const result = await prisma.exam.updateMany({
+      where: { id, deletedAt: null },
+      data: { deletedAt: new Date() },
+    });
+
+    if (result.count === 0) {
       return res.status(404).json({ error: 'Không tìm thấy bài học' });
     }
+
+    res.json({ message: 'Đã xóa mềm bài học' });
+  } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
   }
 });

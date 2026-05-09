@@ -15,8 +15,8 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Tên đăng nhập và mật khẩu là bắt buộc' });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { username: String(username).trim() },
+    const user = await prisma.user.findFirst({
+      where: { username: String(username).trim(), deletedAt: null },
       include: {
         studentClass: {
           include: {

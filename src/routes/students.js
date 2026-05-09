@@ -172,7 +172,7 @@ router.post('/import', authenticate, requireRole('TEACHER'), upload.single('file
 router.get('/', authenticate, requireRole('TEACHER'), async (_req, res) => {
   try {
     const students = await prisma.user.findMany({
-      where: { role: 'STUDENT' },
+      where: { role: 'STUDENT', deletedAt: null },
       include: {
         studentClass: {
           include: {
@@ -222,6 +222,14 @@ router.put('/:id', authenticate, requireRole('TEACHER'), async (req, res) => {
       data.classId = studentClass.id;
     }
 
+    const existing = await prisma.user.findFirst({
+      where: { id, role: 'STUDENT', deletedAt: null },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Không tìm thấy học sinh' });
+    }
+
     const updated = await prisma.user.update({
       where: { id },
       data,
@@ -253,7 +261,14 @@ router.put('/:id/reset-password', authenticate, requireRole('TEACHER'), async (r
     }
 
     const hashed = await bcrypt.hash(newPassword, 10);
-    await prisma.user.update({ where: { id }, data: { password: hashed } });
+    const result = await prisma.user.updateMany({
+      where: { id, role: 'STUDENT', deletedAt: null },
+      data: { password: hashed },
+    });
+
+    if (result.count === 0) {
+      return res.status(404).json({ error: 'Không tìm thấy học sinh' });
+    }
     res.json({ message: 'Đã đặt lại mật khẩu thành công' });
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
@@ -263,8 +278,16 @@ router.put('/:id/reset-password', authenticate, requireRole('TEACHER'), async (r
 router.delete('/:id', authenticate, requireRole('TEACHER'), async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    await prisma.user.delete({ where: { id } });
-    res.json({ message: 'Đã xóa học sinh' });
+    const result = await prisma.user.updateMany({
+      where: { id, role: 'STUDENT', deletedAt: null },
+      data: { deletedAt: new Date() },
+    });
+
+    if (result.count === 0) {
+      return res.status(404).json({ error: 'Không tìm thấy học sinh' });
+    }
+
+    res.json({ message: 'Đã xóa mềm học sinh' });
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
   }

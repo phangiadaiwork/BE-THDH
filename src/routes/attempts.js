@@ -7,15 +7,15 @@ const router = express.Router();
 const prisma = new PrismaClient();
 
 async function getStudentClassId(userId) {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
+  const user = await prisma.user.findFirst({
+    where: { id: userId, deletedAt: null },
     select: { classId: true },
   });
   return user?.classId ?? null;
 }
 
 async function findAccessibleExam(examId, userId, role) {
-  const where = { id: examId };
+  const where = { id: examId, deletedAt: null };
 
   if (role === 'STUDENT') {
     const classId = await getStudentClassId(userId);
@@ -310,7 +310,7 @@ router.get('/my', authenticate, async (req, res) => {
 router.get('/stats', authenticate, requireRole('TEACHER'), async (_req, res) => {
   try {
     const students = await prisma.user.findMany({
-      where: { role: 'STUDENT' },
+      where: { role: 'STUDENT', deletedAt: null },
       include: {
         studentClass: {
           include: {
@@ -426,6 +426,8 @@ router.get('/node-stats', authenticate, requireRole('TEACHER'), async (req, res)
     const students = await prisma.user.findMany({
       where: {
         role: 'STUDENT',
+        deletedAt: null,
+        deletedAt: null,
         ...(className ? { studentClass: { name: className } } : {}),
       },
       select: { id: true },

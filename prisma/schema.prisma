@@ -100,9 +100,12 @@ model User {
   classId    Int?
   studentClass StudentClass? @relation(fields: [classId], references: [id])
   role      Role      @default(STUDENT)
+  deletedAt DateTime?
   attempts  Attempt[]
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
+
+  @@index([deletedAt])
 }
 
 model Exam {
@@ -112,11 +115,14 @@ model Exam {
   title         String
   exerciseTitle String          @default("Bài tập")
   isPublic      Boolean         @default(true)
+  deletedAt     DateTime?
   assignments   ExamAssignment[]
   nodes         MindNode[]
   attempts      Attempt[]
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
+
+  @@index([deletedAt])
 }
 
 model ExamAssignment {
