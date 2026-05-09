@@ -442,20 +442,32 @@ router.get('/node-stats', authenticate, requireRole('TEACHER'), async (req, res)
         deletedAt: null,
         ...(classId && !isNaN(classId) ? { classId } : {}),
       },
-      select: { id: true },
+      select: { id: true, fullName: true, studentClass: { select: { name: true } } },
     });
     const studentIds = students.map((student) => student.id);
 
     const attempts = await prisma.attempt.findMany({
       where: { examId, userId: { in: studentIds }, isComplete: true },
-      select: { id: true },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, userId: true, score: true },
     });
-    const attemptIds = attempts.map((attempt) => attempt.id);
+    
+    const latestAttempts = [];
+    const seenUsers = new Set();
+    for (const a of attempts) {
+      if (!seenUsers.has(a.userId)) {
+        latestAttempts.push(a);
+        seenUsers.add(a.userId);
+      }
+    }
+    const attemptIds = latestAttempts.map((attempt) => attempt.id);
 
     const nodeAnswers = await prisma.nodeAnswer.findMany({
       where: { attemptId: { in: attemptIds } },
-      select: { nodeId: true, isCorrect: true },
+      select: { nodeId: true, isCorrect: true, attemptId: true },
     });
+
+    const nodeMap = new Map(exam.nodes.map(n => [n.id, n]));
 
     const nodeStats = exam.nodes.map((node) => {
       const answers = nodeAnswers.filter((item) => item.nodeId === node.id);
@@ -465,6 +477,7 @@ router.get('/node-stats', authenticate, requireRole('TEACHER'), async (req, res)
       return {
         nodeId: node.id,
         label: node.label,
+        question: node.question,
         parentId: node.parentId,
         total,
         correct,
@@ -472,6 +485,22 @@ router.get('/node-stats', authenticate, requireRole('TEACHER'), async (req, res)
         errorRate: total > 0 ? parseFloat(((incorrect / total) * 100).toFixed(1)) : null,
       };
     });
+
+    const studentMistakes = latestAttempts.map(attempt => {
+      const answers = nodeAnswers.filter(na => na.attemptId === attempt.id);
+      const wrongAnswers = answers.filter(na => !na.isCorrect).map(na => {
+        const node = nodeMap.get(na.nodeId);
+        return { nodeId: node.id, label: node?.label, question: node?.question };
+      });
+      const student = students.find(s => s.id === attempt.userId);
+      return {
+        studentId: student.id,
+        fullName: student.fullName,
+        className: student.studentClass?.name,
+        score: attempt.score,
+        wrongAnswers
+      };
+    }).sort((a, b) => a.score - b.score);
 
     res.json({
       exam: {
@@ -482,6 +511,7 @@ router.get('/node-stats', authenticate, requireRole('TEACHER'), async (req, res)
         gradeLevel: exam.lesson.chapter.grade.code,
       },
       nodeStats,
+      studentMistakes,
     });
   } catch (error) {
     console.error('Node stats error:', error);
