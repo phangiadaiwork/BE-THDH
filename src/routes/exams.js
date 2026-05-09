@@ -119,7 +119,7 @@ function validateNodes(nodes) {
   return null;
 }
 
-async function ensureChapterAndLesson(payload) {
+async function ensureChapterAndLesson(payload, examIdToIgnore = null) {
   const metaError = validateExamMetadata(payload);
   if (metaError) {
     const error = new Error(metaError);
@@ -170,7 +170,7 @@ async function ensureChapterAndLesson(payload) {
     where: { lessonId: lesson.id },
   });
 
-  if (existingExam) {
+  if (existingExam && existingExam.id !== examIdToIgnore) {
     const error = new Error('Bài học này đã có bộ bài tập');
     error.statusCode = 400;
     throw error;
@@ -325,6 +325,106 @@ async function createExamWithNodes(payload, normalizedNodes) {
   });
 }
 
+async function updateExamWithNodes(examId, payload, normalizedNodes) {
+  const { lesson } = await ensureChapterAndLesson(payload, examId);
+
+  const exam = await prisma.exam.update({
+    where: { id: examId },
+    data: {
+      lessonId: lesson.id,
+      title: normalizeText(payload.title || lesson.title, lesson.title),
+      exerciseTitle: payload.exerciseTitle,
+      isPublic: payload.isPublic,
+    },
+  });
+
+  const nodesById = Object.fromEntries(normalizedNodes.map((node) => [node.tempId, node]));
+  const roots = normalizedNodes.filter((node) => !node.parentTempId);
+  const idMap = {};
+  const queue = roots.map((root) => root.tempId);
+  const processed = new Set();
+
+  const existingNodes = await prisma.mindNode.findMany({ where: { examId } });
+  const existingNodeIds = new Set(existingNodes.map((n) => n.id));
+  const nodesToKeep = new Set();
+
+  while (queue.length > 0) {
+    const tempId = queue.shift();
+    if (processed.has(tempId)) continue;
+
+    const node = nodesById[tempId];
+    const parentId = node.parentTempId ? idMap[node.parentTempId] : null;
+
+    const parsedId = parseInt(tempId, 10);
+    const isExistingId = !Number.isNaN(parsedId) && existingNodeIds.has(parsedId);
+
+    let dbNodeId;
+
+    if (isExistingId) {
+      await prisma.mindNode.update({
+        where: { id: parsedId },
+        data: {
+          parentId,
+          label: node.label,
+          question: node.question,
+          options: node.options.length > 0 ? node.options : null,
+          correctAnswer: node.correctAnswer,
+          hint: node.hint,
+          points: node.points,
+          order: node.order,
+        },
+      });
+      dbNodeId = parsedId;
+      nodesToKeep.add(parsedId);
+    } else {
+      const created = await prisma.mindNode.create({
+        data: {
+          examId: exam.id,
+          parentId,
+          label: node.label,
+          question: node.question,
+          options: node.options.length > 0 ? node.options : null,
+          correctAnswer: node.correctAnswer,
+          hint: node.hint,
+          points: node.points,
+          order: node.order,
+        },
+      });
+      dbNodeId = created.id;
+      nodesToKeep.add(dbNodeId);
+    }
+
+    idMap[tempId] = dbNodeId;
+    processed.add(tempId);
+
+    normalizedNodes
+      .filter((child) => child.parentTempId === tempId && !processed.has(child.tempId))
+      .sort((a, b) => a.order - b.order)
+      .forEach((child) => queue.push(child.tempId));
+  }
+
+  const nodesToDelete = Array.from(existingNodeIds).filter((id) => !nodesToKeep.has(id));
+  if (nodesToDelete.length > 0) {
+    await prisma.mindNode.deleteMany({
+      where: { id: { in: nodesToDelete } },
+    });
+  }
+
+  return prisma.exam.findUnique({
+    where: { id: exam.id },
+    include: {
+      lesson: { include: { chapter: { include: { grade: true } } } },
+      assignments: {
+        include: {
+          studentClass: { include: { school: true, grade: true, academicYear: true } },
+        },
+      },
+      nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] },
+      _count: { select: { nodes: true } },
+    },
+  });
+}
+
 router.get('/meta', authenticate, requireRole('TEACHER'), async (_req, res) => {
   try {
     const schools = await prisma.school.findMany({ orderBy: { name: 'asc' } });
@@ -351,6 +451,32 @@ router.post('/', authenticate, requireRole('TEACHER'), async (req, res) => {
     });
   } catch (error) {
     console.error('Create exam error:', error);
+    res.status(error.statusCode || 500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+router.put('/:id', authenticate, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const examId = parseInt(req.params.id, 10);
+    if (Number.isNaN(examId)) return res.status(400).json({ error: 'ID không hợp lệ' });
+
+    const existingExam = await prisma.exam.findFirst({
+      where: { id: examId, deletedAt: null },
+    });
+    if (!existingExam) return res.status(404).json({ error: 'Không tìm thấy bài học' });
+
+    const payload = normalizeExamPayload(req.body);
+    const normalizedNodes = (req.body.nodes || []).map(normalizeNodeInput);
+    const nodeError = validateNodes(normalizedNodes);
+    if (nodeError) return res.status(400).json({ error: nodeError });
+
+    const fullExam = await updateExamWithNodes(examId, payload, normalizedNodes);
+    res.json({
+      ...serializeLessonExam(fullExam),
+      nodes: fullExam.nodes,
+    });
+  } catch (error) {
+    console.error('Update exam error:', error);
     res.status(error.statusCode || 500).json({ error: error.message || 'Internal server error' });
   }
 });
