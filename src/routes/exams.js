@@ -501,7 +501,6 @@ router.post('/import', authenticate, requireRole('TEACHER'), upload.single('file
   try {
     if (!req.file) return res.status(400).json({ error: 'Cần upload file Excel' });
 
-    const payload = normalizeExamPayload(req.body);
     const wb = xlsx.read(req.file.buffer, { type: 'buffer' });
     const ws = wb.Sheets[wb.SheetNames[0]];
     const rows = xlsx.utils.sheet_to_json(ws, { defval: '' });
@@ -512,11 +511,7 @@ router.post('/import', authenticate, requireRole('TEACHER'), upload.single('file
     const nodeError = validateNodes(normalizedNodes);
     if (nodeError) return res.status(400).json({ error: nodeError });
 
-    const fullExam = await createExamWithNodes(payload, normalizedNodes);
-    res.status(201).json({
-      ...serializeLessonExam(fullExam),
-      nodes: fullExam.nodes,
-    });
+    res.status(200).json({ nodes: normalizedNodes });
   } catch (error) {
     console.error('Import exam error:', error);
     res.status(error.statusCode || 500).json({ error: error.message || 'Internal server error' });
