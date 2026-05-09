@@ -307,30 +307,74 @@ router.get('/my', authenticate, async (req, res) => {
   }
 });
 
-router.get('/stats', authenticate, requireRole('TEACHER'), async (_req, res) => {
+router.get('/filters', authenticate, requireRole('TEACHER'), async (_req, res) => {
   try {
+    const classes = await prisma.studentClass.findMany({
+      include: {
+        grade: true,
+        school: true,
+        academicYear: true,
+      },
+      orderBy: [{ academicYear: { startYear: 'desc' } }, { grade: { code: 'asc' } }, { name: 'asc' }],
+    });
+
+    const exams = await prisma.exam.findMany({
+      where: { deletedAt: null },
+      include: {
+        lesson: { include: { chapter: { include: { grade: true } } } },
+      },
+    });
+    
+    res.json({
+      classes: classes.map((c) => ({
+        id: c.id,
+        name: c.name,
+        school: c.school?.name ?? '',
+        gradeLevel: c.grade?.code ?? '',
+        academicYearName: c.academicYear?.name ?? '',
+      })),
+      lessons: exams.map((exam) => serializeLessonExam(exam)),
+    });
+  } catch (error) {
+    console.error('Filters error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/stats', authenticate, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { school, academicYearName, gradeLevel, classId } = req.query;
+
+    const classWhere = {};
+    if (classId && classId !== 'ALL') {
+      classWhere.id = parseInt(classId, 10);
+    } else {
+      if (school) classWhere.school = { name: school };
+      if (academicYearName) classWhere.academicYear = { name: academicYearName };
+      if (gradeLevel) classWhere.grade = { code: gradeLevel };
+    }
+
     const students = await prisma.user.findMany({
-      where: { role: 'STUDENT', deletedAt: null },
+      where: { 
+        role: 'STUDENT', 
+        deletedAt: null,
+        studentClass: classWhere,
+      },
       include: {
         studentClass: {
-          include: {
-            school: true,
-            grade: true,
-            academicYear: true,
-          },
+          include: { school: true, grade: true, academicYear: true },
         },
       },
       orderBy: { fullName: 'asc' },
     });
 
     const exams = await prisma.exam.findMany({
+      where: { deletedAt: null },
       include: {
         lesson: { include: { chapter: { include: { grade: true } } } },
         assignments: {
           include: {
-            studentClass: {
-              include: { school: true, grade: true, academicYear: true },
-            },
+            studentClass: { include: { school: true, grade: true, academicYear: true } },
           },
         },
         _count: { select: { nodes: true } },
@@ -339,15 +383,15 @@ router.get('/stats', authenticate, requireRole('TEACHER'), async (_req, res) => 
 
     const serializedLessons = exams.map((exam) => serializeLessonExam(exam));
     const attempts = await prisma.attempt.findMany({
-      where: { userId: { in: students.map((student) => student.id) } },
+      where: { userId: { in: students.map((s) => s.id) } },
       orderBy: { createdAt: 'asc' },
     });
 
     const rows = students.map((student) => {
-      const studentAttempts = attempts.filter((attempt) => attempt.userId === student.id);
+      const studentAttempts = attempts.filter((a) => a.userId === student.id);
       const lessonStats = serializedLessons.map((lesson) => {
-        const completed = studentAttempts.filter((attempt) => attempt.examId === lesson.id && attempt.isComplete);
-        const inProgress = studentAttempts.filter((attempt) => attempt.examId === lesson.id && !attempt.isComplete);
+        const completed = studentAttempts.filter((a) => a.examId === lesson.id && a.isComplete);
+        const inProgress = studentAttempts.filter((a) => a.examId === lesson.id && !a.isComplete);
         const summary = buildAttemptSummary(completed);
 
         return {
@@ -370,38 +414,7 @@ router.get('/stats', authenticate, requireRole('TEACHER'), async (_req, res) => 
       };
     });
 
-    const classes = await prisma.studentClass.findMany({
-      include: {
-        grade: true,
-        school: true,
-        academicYear: true,
-        _count: { select: { students: true } },
-      },
-    });
-
-    res.json({
-      rows: rows.sort((a, b) =>
-        (b.academicYearName || '').localeCompare(a.academicYearName || '', 'vi') ||
-        (a.gradeLevel || '').localeCompare(b.gradeLevel || '', 'vi') ||
-        (a.className || '').localeCompare(b.className || '', 'vi') ||
-        a.fullName.localeCompare(b.fullName, 'vi')
-      ),
-      classes: classes
-        .sort((a, b) =>
-          (b.academicYear?.name || '').localeCompare(a.academicYear?.name || '', 'vi') ||
-          (a.grade?.code || '').localeCompare(b.grade?.code || '', 'vi') ||
-          a.name.localeCompare(b.name, 'vi')
-        )
-        .map((studentClass) => ({
-          id: studentClass.id,
-          name: studentClass.name,
-          school: studentClass.school?.name ?? '',
-          gradeLevel: studentClass.grade.code,
-          academicYearName: studentClass.academicYear.name,
-          studentCount: studentClass._count.students,
-        })),
-      lessons: serializedLessons,
-    });
+    res.json({ rows, lessons: serializedLessons });
   } catch (error) {
     console.error('Stats error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -411,11 +424,11 @@ router.get('/stats', authenticate, requireRole('TEACHER'), async (_req, res) => 
 router.get('/node-stats', authenticate, requireRole('TEACHER'), async (req, res) => {
   try {
     const examId = parseInt(req.query.examId, 10);
-    const className = req.query.className;
+    const classId = parseInt(req.query.classId, 10);
     if (Number.isNaN(examId)) return res.status(400).json({ error: 'examId là bắt buộc' });
 
     const exam = await prisma.exam.findUnique({
-      where: { id: examId },
+      where: { id: examId, deletedAt: null },
       include: {
         lesson: { include: { chapter: { include: { grade: true } } } },
         nodes: { orderBy: [{ parentId: 'asc' }, { order: 'asc' }] },
@@ -427,8 +440,7 @@ router.get('/node-stats', authenticate, requireRole('TEACHER'), async (req, res)
       where: {
         role: 'STUDENT',
         deletedAt: null,
-        deletedAt: null,
-        ...(className ? { studentClass: { name: className } } : {}),
+        ...(classId && !isNaN(classId) ? { classId } : {}),
       },
       select: { id: true },
     });
