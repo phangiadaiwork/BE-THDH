@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const path = require('path');
 const cors = require('cors');
 const { ensureDefaultAdmin } = require('./utils/ensureDefaultAdmin');
 
@@ -7,6 +8,7 @@ const authRoutes = require('./routes/auth');
 const studentRoutes = require('./routes/students');
 const examRoutes = require('./routes/exams');
 const attemptRoutes = require('./routes/attempts');
+const uploadRoutes = require('./routes/upload');
 
 const app = express();
 
@@ -17,11 +19,13 @@ app.use(
   })
 );
 app.use(express.json());
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/students', studentRoutes);
 app.use('/api/exams', examRoutes);
 app.use('/api/attempts', attemptRoutes);
+app.use('/api/upload', uploadRoutes);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 

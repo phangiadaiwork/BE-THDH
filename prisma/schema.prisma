@@ -143,9 +143,13 @@ model MindNode {
   parentId      Int?
   label         String
   question      String
+  questionImage String?
   options       Json?
+  optionImages  Json?
   correctAnswer String
+  answerImage   String?
   hint          String       @default("")
+  hintImage     String?
   points        Int          @default(1)
   order         Int          @default(0)
   nodeAnswers   NodeAnswer[]
