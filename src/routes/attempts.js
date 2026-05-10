@@ -98,7 +98,7 @@ router.post('/start', authenticate, async (req, res) => {
 
 router.post('/answer', authenticate, async (req, res) => {
   try {
-    const { attemptId, nodeId, answer, isCorrect } = req.body;
+    const { attemptId, nodeId, answer } = req.body;
     const userId = req.user.id;
 
     const attempt = await prisma.attempt.findFirst({
@@ -106,18 +106,30 @@ router.post('/answer', authenticate, async (req, res) => {
     });
     if (!attempt) return res.status(404).json({ error: 'Không tìm thấy lượt làm' });
 
-    await prisma.nodeAnswer.upsert({
+    const existingAnswer = await prisma.nodeAnswer.findUnique({
       where: { attemptId_nodeId: { attemptId: attempt.id, nodeId: parseInt(nodeId, 10) } },
-      update: { answer: String(answer), isCorrect: Boolean(isCorrect) },
-      create: {
+    });
+    if (existingAnswer) {
+      return res.status(400).json({ error: 'Đã trả lời câu hỏi này' });
+    }
+
+    const node = await prisma.mindNode.findUnique({
+      where: { id: parseInt(nodeId, 10) },
+    });
+    if (!node) return res.status(404).json({ error: 'Không tìm thấy câu hỏi' });
+
+    const isCorrect = String(answer).trim().toUpperCase() === String(node.correctAnswer).trim().toUpperCase();
+
+    const createdAnswer = await prisma.nodeAnswer.create({
+      data: {
         attemptId: attempt.id,
         nodeId: parseInt(nodeId, 10),
-        answer: String(answer),
-        isCorrect: Boolean(isCorrect),
+        answer: String(answer).trim(),
+        isCorrect: isCorrect,
       },
     });
 
-    res.json({ ok: true });
+    res.json({ ok: true, isCorrect });
   } catch (error) {
     console.error('Save answer error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -126,18 +138,24 @@ router.post('/answer', authenticate, async (req, res) => {
 
 router.post('/complete', authenticate, async (req, res) => {
   try {
-    const { attemptId, score } = req.body;
+    const { attemptId } = req.body;
     const userId = req.user.id;
-    const parsedScore = parseInt(score, 10);
 
     const attempt = await prisma.attempt.findFirst({
       where: { id: parseInt(attemptId, 10), userId, isComplete: false },
     });
     if (!attempt) return res.status(404).json({ error: 'Không tìm thấy lượt làm' });
 
+    const correctAnswers = await prisma.nodeAnswer.findMany({
+      where: { attemptId: attempt.id, isCorrect: true },
+      include: { node: { select: { points: true } } },
+    });
+    
+    const calculatedScore = correctAnswers.reduce((sum, na) => sum + na.node.points, 0);
+
     const updated = await prisma.attempt.update({
       where: { id: attempt.id },
-      data: { score: Number.isNaN(parsedScore) ? 0 : parsedScore, isComplete: true },
+      data: { score: calculatedScore, isComplete: true },
     });
 
     const allAttempts = await prisma.attempt.findMany({
@@ -210,37 +228,7 @@ router.get('/review', authenticate, async (req, res) => {
   }
 });
 
-router.post('/submit', authenticate, async (req, res) => {
-  try {
-    const { examId, score } = req.body;
-    const userId = req.user.id;
-    const parsedExamId = parseInt(examId, 10);
-    const parsedScore = parseInt(score, 10);
 
-    if (Number.isNaN(parsedExamId) || Number.isNaN(parsedScore)) {
-      return res.status(400).json({ error: 'examId và score phải là số' });
-    }
-
-    const exam = await findAccessibleExam(parsedExamId, userId, req.user.role);
-    if (!exam) return res.status(404).json({ error: 'Không tìm thấy bài tập' });
-
-    const attempt = await prisma.attempt.create({
-      data: { userId, examId: parsedExamId, score: parsedScore, isComplete: true },
-    });
-
-    const allAttempts = await prisma.attempt.findMany({
-      where: { userId, examId: parsedExamId, isComplete: true },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    const summary = buildAttemptSummary(allAttempts);
-
-    res.status(201).json({ attempt, avgScore: summary.avgScore, attemptCount: summary.attemptCount });
-  } catch (error) {
-    console.error('Submit attempt error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
 router.get('/my', authenticate, async (req, res) => {
   try {
