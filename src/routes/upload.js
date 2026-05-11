@@ -9,8 +9,8 @@ const { authenticate, requireRole } = require('../middleware/auth');
 const router = express.Router();
 
 const UPLOAD_DIR = path.join(__dirname, '..', '..', 'uploads');
-const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB before compression
-const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB limit for PDFs/Images
+const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf'];
 
 // Ensure uploads directory exists
 if (!fs.existsSync(UPLOAD_DIR)) {
@@ -24,32 +24,39 @@ const upload = multer({
     if (ALLOWED_MIMES.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Chỉ cho phép file ảnh: JPG, PNG, GIF, WebP'));
+      cb(new Error('Chỉ cho phép file ảnh (JPG, PNG, GIF, WebP) hoặc file PDF'));
     }
   },
 });
 
 /**
  * POST /api/upload
- * Upload a single image, compress it, and return the URL.
+ * Upload a single image/pdf, apply processing if image, return URL.
  */
-router.post('/', authenticate, requireRole('TEACHER'), upload.single('image'), async (req, res) => {
+router.post('/', authenticate, requireRole('TEACHER'), upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ error: 'Cần upload file ảnh' });
+      return res.status(400).json({ error: 'Không tìm thấy file' });
     }
 
-    const uniqueName = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.webp`;
+    const { mimetype, buffer, originalname } = req.file;
+    const isPdf = mimetype === 'application/pdf';
+    const extension = isPdf ? 'pdf' : 'webp';
+    const uniqueName = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${extension}`;
     const outputPath = path.join(UPLOAD_DIR, uniqueName);
 
-    // Compress & convert to webp
-    await sharp(req.file.buffer)
-      .resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true })
-      .webp({ quality: 80 })
-      .toFile(outputPath);
+    if (isPdf) {
+      fs.writeFileSync(outputPath, buffer);
+    } else {
+      // Compress & convert to webp
+      await sharp(buffer)
+        .resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 80 })
+        .toFile(outputPath);
+    }
 
-    const imageUrl = `/uploads/${uniqueName}`;
-    res.json({ url: imageUrl });
+    const fileUrl = `/uploads/${uniqueName}`;
+    res.json({ url: fileUrl });
   } catch (error) {
     console.error('Upload error:', error);
     if (error.message?.includes('Chỉ cho phép')) {
@@ -72,7 +79,7 @@ router.delete('/', authenticate, requireRole('TEACHER'), async (req, res) => {
 
     const filename = path.basename(url);
     // Sanitize: only allow expected filename format
-    if (!/^[\d]+-[a-f0-9]+\.webp$/.test(filename)) {
+    if (!/^[\d]+-[a-f0-9]+\.(webp|pdf)$/.test(filename)) {
       return res.status(400).json({ error: 'Tên file không hợp lệ' });
     }
 

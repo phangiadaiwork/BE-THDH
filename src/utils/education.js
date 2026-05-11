@@ -179,6 +179,7 @@ function serializeLessonExam(exam) {
     lessonNumber: lesson?.number ?? null,
     lessonTitle: lesson?.title ?? '',
     theoryContent: lesson?.theoryContent ?? '',
+    theoryPdf: lesson?.theoryPdf ?? null,
     lessonDisplayOrder: lesson?.displayOrder ?? 0,
     chapterId: chapter?.id ?? null,
     chapterCode: chapter?.code ?? '',

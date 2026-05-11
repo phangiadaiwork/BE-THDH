@@ -83,6 +83,7 @@ model Lesson {
   number         Int?
   title          String
   theoryContent  String    @default("")
+  theoryPdf      String?
   displayOrder   Int       @default(0)
   exam           Exam?
   createdAt      DateTime  @default(now())

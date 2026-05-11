@@ -33,6 +33,7 @@ function normalizeExamPayload(body = {}) {
     lessonTitle: normalizeText(body.lessonTitle || body.title),
     exerciseTitle: normalizeText(body.exerciseTitle, 'Bài tập'),
     theoryContent: String(body.theoryContent ?? '').trim(),
+    theoryPdf: body.theoryPdf || null,
     displayOrder: parseOptionalInt(body.displayOrder),
     title: normalizeText(body.title || body.lessonTitle),
     isPublic: body.isPublic === undefined ? true : Boolean(body.isPublic),
@@ -180,6 +181,7 @@ async function ensureChapterAndLesson(payload, examIdToIgnore = null) {
     update: {
       number: payload.lessonNumber,
       theoryContent: payload.theoryContent,
+      theoryPdf: payload.theoryPdf || null,
       displayOrder: lessonDisplayOrder,
     },
     create: {
@@ -187,6 +189,7 @@ async function ensureChapterAndLesson(payload, examIdToIgnore = null) {
       number: payload.lessonNumber,
       title: payload.lessonTitle,
       theoryContent: payload.theoryContent,
+      theoryPdf: payload.theoryPdf || null,
       displayOrder: lessonDisplayOrder,
     },
   });
