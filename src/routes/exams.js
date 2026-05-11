@@ -64,6 +64,7 @@ function stripHtmlTags(value = '') {
 
 function hasMeaningfulRichText(value = '') {
   const text = stripHtmlTags(value)
+    .replace(/<br\s*\/?>/gi, ' ')
     .replace(/&nbsp;/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -104,7 +105,7 @@ function validateNodes(nodes) {
     if (!node.parentTempId) roots.push(node.tempId);
     if (!node.label) return `Node ${node.tempId} thiếu nhãn`;
     
-    const hasQText = node.question && node.question.replace(/<[^>]*>/g, '').trim() !== '';
+    const hasQText = hasMeaningfulRichText(node.question);
     const hasQImg = !!node.questionImage;
     const isQuestionNode = hasQText || hasQImg;
 
@@ -125,8 +126,8 @@ function validateNodes(nodes) {
       if (!['A', 'B', 'C', 'D'].includes(node.correctAnswer)) {
         return `Node ${node.tempId} phải có đáp án đúng là A, B, C hoặc D`;
       }
-      const expectedAnswerByCount = ['A', 'B', 'C', 'D'][meaningfulOptions.length - 1];
-      if (node.correctAnswer > expectedAnswerByCount) {
+      const correctIndex = ['A', 'B', 'C', 'D'].indexOf(node.correctAnswer);
+      if (correctIndex < 0 || correctIndex >= meaningfulOptions.length) {
         return `Node ${node.tempId} có đáp án đúng không khớp với danh sách phương án`;
       }
     }
