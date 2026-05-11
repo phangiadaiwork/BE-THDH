@@ -64,6 +64,7 @@ function stripHtmlTags(value = '') {
 }
 
 function hasMeaningfulRichText(value = '') {
+  if (String(value).includes('<img')) return true;
   const text = stripHtmlTags(value)
     .replace(/<br\s*\/?>/gi, ' ')
     .replace(/&nbsp;/gi, ' ')
