@@ -91,8 +91,15 @@ function validateNodes(nodes) {
 
     if (!node.parentTempId) roots.push(node.tempId);
     if (!node.label) return `Node ${node.tempId} thiếu nhãn`;
-    if (!node.question) return `Node ${node.tempId} thiếu câu hỏi`;
-    if (!node.correctAnswer) return `Node ${node.tempId} thiếu đáp án đúng`;
+    
+    const hasQText = node.question && node.question.replace(/<[^>]*>/g, '').trim() !== '';
+    const hasQImg = !!node.questionImage;
+    const isQuestionNode = hasQText || hasQImg;
+
+    if (isQuestionNode && !node.correctAnswer) {
+      return `Node ${node.tempId} có câu hỏi nhưng thiếu đáp án đúng`;
+    }
+    
     if (node.parentTempId && node.parentTempId === node.tempId) {
       return `Node ${node.tempId} không thể là cha của chính nó`;
     }
