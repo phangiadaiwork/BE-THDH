@@ -55,7 +55,19 @@ function normalizeOptionValues(node) {
     .map((key) => normalizeText(node[key]))
     .filter(Boolean);
 
-  return rawOptions.map((option, index) => `${['A', 'B', 'C', 'D'][index]}. ${option}`);
+  return rawOptions;
+}
+
+function stripHtmlTags(value = '') {
+  return String(value).replace(/<[^>]*>/g, ' ');
+}
+
+function hasMeaningfulRichText(value = '') {
+  const text = stripHtmlTags(value)
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > 0;
 }
 
 function normalizeNodeInput(node, index = 0) {
@@ -106,14 +118,15 @@ function validateNodes(nodes) {
 
     const hasOptions = Array.isArray(node.options) && node.options.length > 0;
     if (hasOptions) {
-      if (node.options.length < 2 || node.options.length > 4) {
+      const meaningfulOptions = node.options.filter((option) => hasMeaningfulRichText(option));
+      if (meaningfulOptions.length < 2 || meaningfulOptions.length > 4) {
         return `Node ${node.tempId} phải có từ 2 đến 4 phương án`;
       }
       if (!['A', 'B', 'C', 'D'].includes(node.correctAnswer)) {
         return `Node ${node.tempId} phải có đáp án đúng là A, B, C hoặc D`;
       }
-      const optionLetters = node.options.map((option) => option.charAt(0));
-      if (!optionLetters.includes(node.correctAnswer)) {
+      const expectedAnswerByCount = ['A', 'B', 'C', 'D'][meaningfulOptions.length - 1];
+      if (node.correctAnswer > expectedAnswerByCount) {
         return `Node ${node.tempId} có đáp án đúng không khớp với danh sách phương án`;
       }
     }
