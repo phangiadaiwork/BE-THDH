@@ -84,6 +84,7 @@ model Lesson {
   title          String
   theoryContent  String    @default("")
   theoryPdf      String?
+  theoryVideos   Json?
   displayOrder   Int       @default(0)
   exam           Exam?
   createdAt      DateTime  @default(now())

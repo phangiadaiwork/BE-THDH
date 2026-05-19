@@ -180,6 +180,7 @@ function serializeLessonExam(exam) {
     lessonTitle: lesson?.title ?? '',
     theoryContent: lesson?.theoryContent ?? '',
     theoryPdf: lesson?.theoryPdf ?? null,
+    theoryVideos: Array.isArray(lesson?.theoryVideos) ? lesson.theoryVideos : [],
     lessonDisplayOrder: lesson?.displayOrder ?? 0,
     chapterId: chapter?.id ?? null,
     chapterCode: chapter?.code ?? '',

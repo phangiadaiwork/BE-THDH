@@ -14,6 +14,19 @@ const router = express.Router();
 const prisma = new PrismaClient();
 const upload = multer({ storage: multer.memoryStorage() });
 
+function normalizeVideoUrls(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === 'string') return item.trim();
+      if (item && typeof item === 'object' && typeof item.url === 'string') {
+        return { url: item.url.trim(), title: normalizeText(item.title) };
+      }
+      return null;
+    })
+    .filter((item) => (typeof item === 'string' ? item.length > 0 : item && item.url));
+}
+
 function slugifyChapterCode(value) {
   return normalizeText(value)
     .toLowerCase()
@@ -34,6 +47,7 @@ function normalizeExamPayload(body = {}) {
     exerciseTitle: normalizeText(body.exerciseTitle, 'Bài tập'),
     theoryContent: String(body.theoryContent ?? '').trim(),
     theoryPdf: body.theoryPdf || null,
+    theoryVideos: normalizeVideoUrls(body.theoryVideos),
     displayOrder: parseOptionalInt(body.displayOrder),
     title: normalizeText(body.title || body.lessonTitle),
     isPublic: body.isPublic === undefined ? true : Boolean(body.isPublic),
@@ -183,6 +197,7 @@ async function ensureChapterAndLesson(payload, examIdToIgnore = null) {
       number: payload.lessonNumber,
       theoryContent: payload.theoryContent,
       theoryPdf: payload.theoryPdf || null,
+      theoryVideos: payload.theoryVideos,
       displayOrder: lessonDisplayOrder,
     },
     create: {
@@ -191,6 +206,7 @@ async function ensureChapterAndLesson(payload, examIdToIgnore = null) {
       title: payload.lessonTitle,
       theoryContent: payload.theoryContent,
       theoryPdf: payload.theoryPdf || null,
+      theoryVideos: payload.theoryVideos,
       displayOrder: lessonDisplayOrder,
     },
   });
