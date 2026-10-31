@@ -136,11 +136,11 @@ router.get('/', authenticate, async (req, res) => {
         questionCount: exam._count.questions,
         totalAttempts: exam._count.attempts,
         createdAt: exam.createdAt,
-        assignedClasses: exam.assignments.map((a) => ({
-          id: a.studentClass.id,
-          name: a.studentClass.name,
-          school: a.studentClass.school.name,
-          academicYear: a.studentClass.academicYear.name,
+        assignedClasses: (exam.assignments || []).map((a) => ({
+          id: a.studentClass?.id,
+          name: a.studentClass?.name || '',
+          school: a.studentClass?.school?.name || '',
+          academicYear: a.studentClass?.academicYear?.name || '',
         })),
         myAttempt,
       };
@@ -149,7 +149,7 @@ router.get('/', authenticate, async (req, res) => {
     res.json({ exams: data });
   } catch (error) {
     console.error('List chapter exams error:', error);
-    res.status(500).json({ error: 'Không thể tải danh sách bài kiểm tra chương' });
+    res.status(500).json({ error: error.message || 'Không thể tải danh sách bài kiểm tra chương' });
   }
 });
 
@@ -472,7 +472,7 @@ router.post('/', authenticate, requireRole('TEACHER'), async (req, res) => {
     res.status(201).json({ id: createdExam.id, message: 'Tạo bài kiểm tra chương thành công' });
   } catch (error) {
     console.error('Create chapter exam error:', error);
-    res.status(500).json({ error: 'Không thể tạo bài kiểm tra chương' });
+    res.status(500).json({ error: error.message || 'Không thể tạo bài kiểm tra chương' });
   }
 });
 
