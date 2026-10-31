@@ -31,7 +31,16 @@ router.get('/', authenticate, async (req, res) => {
     if (chapterId && !Number.isNaN(parseInt(chapterId, 10))) {
       where.chapterId = parseInt(chapterId, 10);
     } else if (gradeLevel) {
-      where.chapter = { grade: { code: String(gradeLevel) } };
+      const gNum = String(gradeLevel).replace(/\D/g, '');
+      where.chapter = {
+        grade: {
+          OR: [
+            { code: gNum || String(gradeLevel) },
+            { code: String(gradeLevel) },
+            { title: { contains: gNum || String(gradeLevel) } },
+          ],
+        },
+      };
     }
 
     if (role === 'STUDENT') {
@@ -114,9 +123,9 @@ router.get('/', authenticate, async (req, res) => {
       return {
         id: exam.id,
         chapterId: exam.chapterId,
-        chapterTitle: exam.chapter.title,
-        chapterCode: exam.chapter.code,
-        gradeLevel: exam.chapter.grade.code,
+        chapterTitle: exam.chapter?.title || '',
+        chapterCode: exam.chapter?.code || '',
+        gradeLevel: exam.chapter?.grade?.code || '',
         title: exam.title,
         description: exam.description || '',
         duration: exam.duration,
@@ -150,23 +159,74 @@ router.get('/', authenticate, async (req, res) => {
 // ----------------------------------------------------
 router.get('/available-chapters', authenticate, requireRole('TEACHER'), async (req, res) => {
   try {
-    const { gradeLevel } = req.query;
+    const rawGrade = String(req.query.gradeLevel || '').trim();
+    const cleanGradeNum = rawGrade.replace(/\D/g, '');
+
     const where = {};
-    if (gradeLevel && ['10', '11', '12'].includes(String(gradeLevel))) {
-      where.grade = { code: String(gradeLevel) };
+    if (cleanGradeNum) {
+      where.OR = [
+        { grade: { code: cleanGradeNum } },
+        { grade: { code: rawGrade } },
+        { grade: { title: { contains: cleanGradeNum } } },
+      ];
     }
-    const chapters = await prisma.chapter.findMany({
+
+    let chapters = await prisma.chapter.findMany({
       where,
-      include: { grade: true },
-      orderBy: [{ grade: { code: 'asc' } }, { displayOrder: 'asc' }, { title: 'asc' }],
+      include: {
+        grade: true,
+        _count: { select: { lessons: true } },
+      },
+      orderBy: [
+        { displayOrder: 'asc' },
+        { title: 'asc' },
+      ],
     });
+
+    // Fallback: nếu danh sách trống và có cleanGradeNum, quét qua bảng Lesson
+    if (chapters.length === 0 && cleanGradeNum) {
+      const lessons = await prisma.lesson.findMany({
+        where: {
+          chapter: {
+            OR: [
+              { grade: { code: cleanGradeNum } },
+              { grade: { code: rawGrade } },
+              { grade: { title: { contains: cleanGradeNum } } },
+            ],
+          },
+        },
+        include: {
+          chapter: {
+            include: { grade: true },
+          },
+        },
+      });
+
+      const map = new Map();
+      lessons.forEach((l) => {
+        if (l.chapter && !map.has(l.chapter.id)) {
+          map.set(l.chapter.id, l.chapter);
+        }
+      });
+      chapters = Array.from(map.values());
+    }
+
+    // Nếu vẫn trống (ví dụ gradeLevel không truyền hoặc DB chứa chapter độc lập)
+    if (chapters.length === 0 && !cleanGradeNum) {
+      chapters = await prisma.chapter.findMany({
+        include: { grade: true },
+        orderBy: [{ displayOrder: 'asc' }, { title: 'asc' }],
+      });
+    }
+
     res.json({
       chapters: chapters.map((c) => ({
         id: c.id,
-        code: c.code,
+        code: c.code || `chapter-${c.id}`,
         title: c.title,
-        displayOrder: c.displayOrder,
-        gradeLevel: c.grade.code,
+        displayOrder: c.displayOrder ?? 0,
+        gradeLevel: c.grade?.code || cleanGradeNum || '12',
+        lessonCount: c._count?.lessons ?? 0,
       })),
     });
   } catch (error) {
@@ -272,9 +332,9 @@ router.get('/:id', authenticate, async (req, res) => {
     res.json({
       id: exam.id,
       chapterId: exam.chapterId,
-      chapterTitle: exam.chapter.title,
-      chapterCode: exam.chapter.code,
-      gradeLevel: exam.chapter.grade.code,
+      chapterTitle: exam.chapter?.title || '',
+      chapterCode: exam.chapter?.code || '',
+      gradeLevel: exam.chapter?.grade?.code || '',
       title: exam.title,
       description: exam.description || '',
       duration: exam.duration,
@@ -855,8 +915,8 @@ router.get('/attempt/:attemptId/review', authenticate, async (req, res) => {
       attemptId: attempt.id,
       examId: attempt.chapterExamId,
       examTitle: attempt.chapterExam.title,
-      chapterTitle: attempt.chapterExam.chapter.title,
-      gradeLevel: attempt.chapterExam.chapter.grade.code,
+      chapterTitle: attempt.chapterExam.chapter?.title || '',
+      gradeLevel: attempt.chapterExam.chapter?.grade?.code || '',
       score: attempt.score,
       correctCount: attempt.correctCount,
       totalCount: attempt.totalCount,
@@ -1161,9 +1221,9 @@ router.get('/:id/results', authenticate, requireRole('TEACHER'), async (req, res
       exam: {
         id: exam.id,
         title: exam.title,
-        chapterTitle: exam.chapter.title,
-        chapterCode: exam.chapter.code,
-        gradeLevel: exam.chapter.grade.code,
+        chapterTitle: exam.chapter?.title || '',
+        chapterCode: exam.chapter?.code || '',
+        gradeLevel: exam.chapter?.grade?.code || '',
         duration: exam.duration,
         maxAttempts: exam.maxAttempts ?? 1,
         questionCount: exam.questions.length,
