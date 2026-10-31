@@ -55,6 +55,7 @@ model StudentClass {
   academicYear AcademicYear    @relation(fields: [academicYearId], references: [id])
   students     User[]
   assignments  ExamAssignment[]
+  chapterAssignments ChapterExamAssignment[]
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
 
@@ -69,6 +70,7 @@ model Chapter {
   title         String
   displayOrder  Int       @default(0)
   lessons       Lesson[]
+  chapterExams  ChapterExam[]
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -95,17 +97,18 @@ model Lesson {
 }
 
 model User {
-  id        Int       @id @default(autoincrement())
-  username  String    @unique
-  password  String
-  fullName  String
-  classId    Int?
-  studentClass StudentClass? @relation(fields: [classId], references: [id])
-  role      Role      @default(STUDENT)
-  deletedAt DateTime?
-  attempts  Attempt[]
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  id              Int                  @id @default(autoincrement())
+  username        String               @unique
+  password        String
+  fullName        String
+  classId         Int?
+  studentClass    StudentClass?        @relation(fields: [classId], references: [id])
+  role            Role                 @default(STUDENT)
+  deletedAt       DateTime?
+  attempts        Attempt[]
+  chapterAttempts ChapterExamAttempt[]
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
 
   @@index([deletedAt])
 }
@@ -181,4 +184,88 @@ model NodeAnswer {
   answeredAt DateTime @default(now())
 
   @@unique([attemptId, nodeId])
+}
+
+model ChapterExam {
+  id          Int                     @id @default(autoincrement())
+  chapterId   Int
+  chapter     Chapter                 @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  title       String
+  description String?                 @default("")
+  duration    Int                     @default(45) // Thời gian làm bài (phút), 0 = không giới hạn
+  isPublic    Boolean                 @default(true)
+  maxAttempts Int                     @default(1) // Số lần làm tối đa (1 = 1 lần, 2 = 2 lần, 0 = không giới hạn)
+  deletedAt   DateTime?
+  assignments ChapterExamAssignment[]
+  questions   ChapterQuestion[]
+  attempts    ChapterExamAttempt[]
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+
+  @@index([chapterId])
+  @@index([deletedAt])
+}
+
+model ChapterExamAssignment {
+  id            Int          @id @default(autoincrement())
+  chapterExamId Int
+  chapterExam   ChapterExam  @relation(fields: [chapterExamId], references: [id], onDelete: Cascade)
+  classId       Int
+  studentClass  StudentClass @relation(fields: [classId], references: [id], onDelete: Cascade)
+  createdAt     DateTime     @default(now())
+
+  @@unique([chapterExamId, classId])
+}
+
+model ChapterQuestion {
+  id            Int                    @id @default(autoincrement())
+  chapterExamId Int
+  chapterExam   ChapterExam            @relation(fields: [chapterExamId], references: [id], onDelete: Cascade)
+  content       String                 // Nội dung câu hỏi (hỗ trợ Math / HTML)
+  image         String?
+  options       Json                   // Mảng các lựa chọn ["A. ...", "B. ...", ...]
+  optionImages  Json?
+  correctAnswer String                 // "A", "B", "C", "D"
+  explanation   String?                @default("") // Lời giải chi tiết
+  explanationImage String?             // Ảnh lời giải chi tiết (nếu có)
+  points        Float                  @default(1)
+  order         Int                    @default(0)
+  answers       ChapterStudentAnswer[]
+
+  @@index([chapterExamId, order])
+}
+
+model ChapterExamAttempt {
+  id            Int                    @id @default(autoincrement())
+  userId        Int
+  user          User                   @relation(fields: [userId], references: [id])
+  chapterExamId Int
+  chapterExam   ChapterExam            @relation(fields: [chapterExamId], references: [id], onDelete: Cascade)
+  score         Float                  @default(0)
+  totalPoints   Float                  @default(0)
+  correctCount  Int                    @default(0)
+  totalCount    Int                    @default(0)
+  isComplete    Boolean                @default(false)
+  outCount      Int                    @default(0) // Số lần out ra khỏi màn hình / tab
+  startedAt     DateTime               @default(now())
+  submittedAt   DateTime?
+  durationSpent Int                    @default(0) // Số giây đã làm bài
+  answers       ChapterStudentAnswer[]
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+
+  @@index([userId, chapterExamId])
+}
+
+model ChapterStudentAnswer {
+  id         Int                @id @default(autoincrement())
+  attemptId  Int
+  attempt    ChapterExamAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  questionId Int
+  question   ChapterQuestion    @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  selected   String?            // "A", "B", "C", "D"
+  isCorrect  Boolean            @default(false)
+  answeredAt DateTime           @default(now())
+
+  @@unique([attemptId, questionId])
 }

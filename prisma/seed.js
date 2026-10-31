@@ -152,6 +152,80 @@ async function seedLessonExam(item) {
   }
 }
 
+async function seedSampleChapterExam() {
+  const grade12 = await ensureGrade(prisma, '12');
+  const chapter = await prisma.chapter.findFirst({
+    where: { gradeId: grade12.id, code: 'chuong-vi' },
+  });
+  if (!chapter) return;
+
+  const existing = await prisma.chapterExam.findFirst({
+    where: { chapterId: chapter.id, title: 'Bài kiểm tra trắc nghiệm Chương VI: Lũy thừa và Logarit' },
+  });
+  if (existing) return;
+
+  await prisma.chapterExam.create({
+    data: {
+      chapterId: chapter.id,
+      title: 'Bài kiểm tra trắc nghiệm Chương VI: Lũy thừa và Logarit',
+      description: 'Bài kiểm tra đánh giá kiến thức toàn chương VI: Lũy thừa với số mũ thực, hàm số lũy thừa, logarit và hàm số logarit. Hệ thống sẽ ghi nhận số lần chuyển tab / rời màn hình làm bài.',
+      duration: 15,
+      isPublic: true,
+      questions: {
+        create: [
+          {
+            content: 'Cho $a > 0, a \\ne 1$. Biểu thức $\\log_a(a^3)$ có giá trị bằng:',
+            options: ['A. 1', 'B. 2', 'C. 3', 'D. a'],
+            correctAnswer: 'C',
+            explanation: 'Theo tính chất logarit: $\\log_a(a^x) = x$, do đó $\\log_a(a^3) = 3$.',
+            points: 2,
+            order: 0,
+          },
+          {
+            content: 'Với $a, b > 0$ và $a \\ne 1$, khẳng định nào sau đây là khẳng định ĐÚNG?',
+            options: [
+              'A. $\\log_a(ab) = \\log_a a \\cdot \\log_a b$',
+              'B. $\\log_a(ab) = \\log_a a + \\log_a b$',
+              'C. $\\log_a(ab) = \\log_a a - \\log_a b$',
+              'D. $\\log_a(ab) = \\frac{\\log_a a}{\\log_a b}$',
+            ],
+            correctAnswer: 'B',
+            explanation: 'Logarit của một tích bằng tổng các logarit: $\\log_a(ab) = \\log_a a + \\log_a b$.',
+            points: 2,
+            order: 1,
+          },
+          {
+            content: 'Tập xác định của hàm số $y = \\log_2(x - 3)$ là:',
+            options: ['A. $(3; +\\infty)$', 'B. $[3; +\\infty)$', 'C. $(-\\infty; 3)$', 'D. $\\mathbb{R} \\setminus \\{3\\}$'],
+            correctAnswer: 'A',
+            explanation: 'Điều kiện xác định của biểu thức dưới dấu logarit: $x - 3 > 0 \\Leftrightarrow x > 3$. Do đó $D = (3; +\\infty)$.',
+            points: 2,
+            order: 2,
+          },
+          {
+            content: 'Giá trị của biểu thức $P = 2^{\\log_2 8}$ bằng:',
+            options: ['A. 2', 'B. 4', 'C. 8', 'D. 16'],
+            correctAnswer: 'C',
+            explanation: 'Theo đồng nhất thức logarit: $a^{\\log_a b} = b$ với $a > 0, a \\ne 1, b > 0$. Vậy $2^{\\log_2 8} = 8$.',
+            points: 2,
+            order: 3,
+          },
+          {
+            content: 'Rút gọn biểu thức $Q = a^{\\frac{1}{3}} \\cdot \\sqrt{a}$ với $a > 0$ ta được:',
+            options: ['A. $a^{\\frac{5}{6}}$', 'B. $a^{\\frac{1}{6}}$', 'C. $a^{\\frac{2}{3}}$', 'D. $a^{\\frac{4}{3}}$'],
+            correctAnswer: 'A',
+            explanation: 'Ta có $\\sqrt{a} = a^{\\frac{1}{2}}$. Khi đó $Q = a^{\\frac{1}{3}} \\cdot a^{\\frac{1}{2}} = a^{\\frac{1}{3} + \\frac{1}{2}} = a^{\\frac{5}{6}}$.',
+            points: 2,
+            order: 4,
+          },
+        ],
+      },
+    },
+  });
+
+  console.log('Sample Chapter Exam created successfully!');
+}
+
 async function main() {
   await ensureDefaultAdmin();
   await ensureSchool(prisma, 'THPT Lê Lợi');
@@ -171,6 +245,8 @@ async function main() {
   for (const lesson of sampleLessons) {
     await seedLessonExam(lesson);
   }
+
+  await seedSampleChapterExam();
 
   console.log('Seed hoàn tất: admin/admin123, lớp theo năm học 2025-2026 và học liệu mẫu');
 }

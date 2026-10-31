@@ -9,6 +9,7 @@ const studentRoutes = require('./routes/students');
 const examRoutes = require('./routes/exams');
 const attemptRoutes = require('./routes/attempts');
 const uploadRoutes = require('./routes/upload');
+const chapterExamRoutes = require('./routes/chapterExams');
 
 const app = express();
 
@@ -27,6 +28,7 @@ app.use('/api/students', studentRoutes);
 app.use('/api/exams', examRoutes);
 app.use('/api/attempts', attemptRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/chapter-exams', chapterExamRoutes);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
